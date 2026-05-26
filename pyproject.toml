@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "patas"
+version = "0.1.0"
+description = "PATAS — Probabilistic Trust Assessment System for Neural Networks"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scikit-learn",
+    "matplotlib",
+    "tqdm",
+    # tensorflow is used for the MNIST/keras datasets loader.
+    # Install manually if not needed: `pip install tensorflow` or `pip install keras`
+]
+
+[project.scripts]
+# Enables:  patas --mode both --testcase cancer
+patas = "patas_module.__main__:main_entry"
+
+[tool.setuptools.packages.find]
+# Look for packages starting from v2/ (this file's directory)
+where = ["."]
+include = ["patas_module*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+# Integration markers
+markers = [
+    "integration: slow end-to-end tests (deselect with -m 'not integration')",
+]
