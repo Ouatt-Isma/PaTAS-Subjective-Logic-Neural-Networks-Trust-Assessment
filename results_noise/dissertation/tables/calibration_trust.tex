@@ -1,0 +1,27 @@
+\begin{table}[ht]
+\centering
+\caption{Algorithm~5 calibration-trust opinions for trained NNs across noise conditions. Opinions averaged over 5 independent runs. High belief $b$ indicates a well-calibrated, trustworthy model; high uncertainty $u$ indicates insufficient evidence.}
+\label{tab:calibration-trust}
+\begin{tabular}{lcccc}
+\toprule
+Condition & Belief $b$ (mean$\pm$std) & Disbelief $d$ (mean$\pm$std) & Uncertainty $u$ (mean$\pm$std) & Dominant \\
+\midrule
+\multicolumn{5}{l}{\textit{Feature noise (calibrated $T_x$)}} \\
+0.00 & 0.8090$\pm$0.0000 & 0.1854$\pm$0.0000 & 0.0056$\pm$0.0000 & b \\
+0.10 & — & — & — & d \\
+0.30 & — & — & — & d \\
+0.50 & — & — & — & d \\
+\midrule \\
+\multicolumn{5}{l}{\textit{Label noise (trusted $T_x$)}} \\
+0.00 & — & — & — & d \\
+0.05 & — & — & — & d \\
+0.15 & — & — & — & d \\
+0.30 & — & — & — & d \\
+\midrule \\
+\multicolumn{5}{l}{\textit{Combined noise}} \\
+(0.10,0.05) & — & — & — & d \\
+(0.30,0.15) & — & — & — & d \\
+(0.50,0.30) & — & — & — & d \\
+\bottomrule
+\end{tabular}
+\end{table}

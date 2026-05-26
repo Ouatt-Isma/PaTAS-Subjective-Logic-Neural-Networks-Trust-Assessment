@@ -1,6 +1,15 @@
 """
 Subjective Logic (SL) operators and binomial opinion data structure.
 
+NOTE: The **canonical** implementation of this module lives at
+``patas_module/subjective_logic.py``.  This root-level copy is kept only for
+scripts (e.g. patas.py) that pre-date the integration of SL into patas_module.
+If you are writing new code, import from the package instead:
+
+    from patas_module.subjective_logic import Opinion, fuse_many, ...
+    # or
+    from patas_module import Opinion, fuse_many, ...
+
 Implements the operators required by PaTAS-TP (Chapter 7 of the dissertation):
     * Trust discounting          (⊗)
     * Cumulative belief fusion   (⊕ cumulative)    [CBF / aCBF]
