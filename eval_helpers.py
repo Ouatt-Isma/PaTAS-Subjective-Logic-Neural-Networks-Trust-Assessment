@@ -6,7 +6,7 @@ import numpy as np
 from primary_nn import PrimaryNN
 from patas import (TrustNodesNetwork, trust_feedforward,
                    aggregate_output_trust, gen_ipta, build_input_trust)
-from subjective_logic import Opinion
+from patas_module.subjective_logic import Opinion
 
 
 def evaluate_canonical_profiles(tnn: TrustNodesNetwork, n_in: int,
