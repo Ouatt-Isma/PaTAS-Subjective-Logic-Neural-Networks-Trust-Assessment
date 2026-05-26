@@ -44,7 +44,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from subjective_logic import Opinion, bpq, fuse_many
+from patas_module.subjective_logic import Opinion, bpq, fuse_many
 
 # ---------------------------------------------------------------------------
 # Plot style (matches eval_5g_noise.py)

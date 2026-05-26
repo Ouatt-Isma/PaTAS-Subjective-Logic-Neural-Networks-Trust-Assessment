@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 import numpy as np
 
-from subjective_logic import (
+from patas_module.subjective_logic import (
     Opinion, vacuous, trusted, distrusted,
     discount, averaging_fusion, fuse_many,
     revise, multiply, conservative_div, deduce, bpq,
