@@ -77,6 +77,67 @@ def _datapath(cfg: TestCaseConfig) -> str:
     )
 
 
+def _ptas_datapath(cfg: TestCaseConfig) -> str:
+    """Return the result directory that start_ptas() writes to."""
+    hidden_list = list(cfg.hidden_dims) if cfg.hidden_dims else [cfg.hidden_dim]
+    arch_str = "_".join(str(h) for h in hidden_list)
+    return (
+        f"results/PTAS_Eval_{cfg.dataset}_{arch_str}_{cfg.x_trust}_{cfg.y_trust}"
+        f"_eps_{cfg.epsilon_low}"
+        f"_PathSize_{cfg.mnist_patch_size if cfg.mnist_poisoned_soph else 'None'}"
+    )
+
+
+def _load_result_from_disk(
+    cfg: TestCaseConfig,
+    nn_dp: str,
+    ptas_dp: str,
+) -> dict[str, Any]:
+    """
+    Reconstruct a scenario result from files already on disk.
+    Works with whatever subset of files exists:
+      • at.pkl          → trust_for_3 / trust_for_6
+      • omega_arrays.pkl → omega_arrays (needed for IPTA)
+      • metrics.txt     → accuracy numbers
+    Missing files are silently replaced with NaN / None.
+    """
+    import pickle
+
+    trust_for_3 = trust_for_6 = trust_mass = float("nan")
+    omega_arrays = None
+
+    at_path = os.path.join(ptas_dp, "at.pkl")
+    if os.path.exists(at_path):
+        with open(at_path, "rb") as _f:
+            at = pickle.load(_f)
+        from NN.PTAStemplate import PTAS as PTASClass
+        trust_for_3 = float(at.value[0, 3, 0])
+        trust_for_6 = float(at.value[0, 6, 0])
+        trust_mass  = float(PTASClass.aggregation(at)[0])
+
+    omega_path = os.path.join(ptas_dp, "omega_arrays.pkl")
+    if os.path.exists(omega_path):
+        with open(omega_path, "rb") as _f:
+            omega_arrays = pickle.load(_f)
+
+    metrics = _read_metrics(os.path.join(nn_dp, "metrics.txt"))
+
+    return {
+        "patch_size":   cfg.mnist_patch_size,
+        "trust_mass":   trust_mass,
+        "trust_for_3":  trust_for_3,
+        "trust_for_6":  trust_for_6,
+        "omega_arrays": omega_arrays,
+        "train_acc":    metrics.get("Train",             float("nan")),
+        "test_acc":     metrics.get("Test",              float("nan")),
+        "acc_clean_3":  metrics.get("Clean Images 3",    float("nan")),
+        "acc_clean_6":  metrics.get("Clean Images 6",    float("nan")),
+        "acc_pois_3":   metrics.get("Poisoned Images 3", float("nan")),
+        "acc_pois_6":   metrics.get("Poisoned Images 6", float("nan")),
+        "datapath":     nn_dp,
+    }
+
+
 def _read_metrics(path: str) -> dict[str, float]:
     """
     Read the metrics.txt written by nn.train(plot=True, fname=...).
@@ -150,43 +211,54 @@ def _ptas_worker(
 ) -> None:
     """
     Run start_ptas() (mirrors the 'server' mode in main.py).
-    After training completes, derives trust metrics and saves omega_arrays
-    for offline IPTA computation.
+    Results are put in the queue immediately after training completes,
+    BEFORE the slow ptas_evaluation / eval_plot phase, so the main
+    process never waits for plotting when reading ptas_q.
     """
+    from concrete.ArrayTO import ArrayTO
+    from concrete.TrustOpinion import TrustOpinion
+    from NN.PTAStemplate import PTAS as PTASClass
+
+    _result_sent = [False]
+
+    def _post_training(ptas):
+        """Called by start_ptas() right after run_chunk(), before eval_plot."""
+        try:
+            trusted_input = ArrayTO(TrustOpinion.fill((1, cfg.input_dim), method="trust"))
+            a_trust = ptas.apply_feedforward(trusted_input)
+            # a_trust.value shape: (1, output_dim, 3)  →  [batch, class, t/d/u]
+            result_queue.put({
+                "trust_mass":   float(PTASClass.aggregation(a_trust)[0]),
+                "trust_for_3":  float(a_trust.value[0, 3, 0]),
+                "trust_for_6":  float(a_trust.value[0, 6, 0]),
+                "omega_arrays": [ot.value.copy() for ot in ptas.omega_thetas],
+            })
+        except Exception as exc:
+            import traceback
+            result_queue.put({
+                "trust_mass":   float("nan"),
+                "trust_for_3":  float("nan"),
+                "trust_for_6":  float("nan"),
+                "omega_arrays": None,
+                "error": str(exc),
+                "tb":    traceback.format_exc(),
+            })
+        finally:
+            _result_sent[0] = True
+
     try:
-        ptas = start_ptas(cfg, ready_event=ready_event)
-
-        from concrete.ArrayTO import ArrayTO
-        from concrete.TrustOpinion import TrustOpinion
-        from NN.PTAStemplate import PTAS as PTASClass
-
-        # Trust at each output neuron when input is fully trusted
-        trusted_input = ArrayTO(TrustOpinion.fill((1, cfg.input_dim), method="trust"))
-        a_trust = ptas.apply_feedforward(trusted_input)
-        # a_trust.value shape: (1, output_dim, 3)  →  [batch, class, t/d/u]
-        trust_for_3 = float(a_trust.value[0, 3, 0])
-        trust_for_6 = float(a_trust.value[0, 6, 0])
-        trust_mass  = float(PTASClass.aggregation(a_trust)[0])
-
-        # Save omega_thetas as plain numpy arrays (picklable across the queue)
-        omega_arrays = [ot.value.copy() for ot in ptas.omega_thetas]
-
-        result_queue.put({
-            "trust_mass":   trust_mass,
-            "trust_for_3":  trust_for_3,
-            "trust_for_6":  trust_for_6,
-            "omega_arrays": omega_arrays,
-        })
+        start_ptas(cfg, ready_event=ready_event, post_training_callback=_post_training)
     except Exception as exc:
-        import traceback
-        result_queue.put({
-            "trust_mass":   float("nan"),
-            "trust_for_3":  float("nan"),
-            "trust_for_6":  float("nan"),
-            "omega_arrays": None,
-            "error": str(exc),
-            "tb":    traceback.format_exc(),
-        })
+        if not _result_sent[0]:
+            import traceback
+            result_queue.put({
+                "trust_mass":   float("nan"),
+                "trust_for_3":  float("nan"),
+                "trust_for_6":  float("nan"),
+                "omega_arrays": None,
+                "error": str(exc),
+                "tb":    traceback.format_exc(),
+            })
 
 
 def _client_worker(
@@ -227,13 +299,30 @@ def _client_worker(
 
 def run_poisoned_scenario(
     cfg: TestCaseConfig,
+    force_retrain: bool = False,
 ) -> dict[str, Any]:
     """
     Launch PTAS + NN client for one poisoned-MNIST scenario.
     Replicates the two-process setup in main.py (server + client).
     Queue reads happen BEFORE joins to avoid Windows pipe-buffer deadlock
     (a subprocess blocking on put() when the pipe buffer fills with large data).
+
+    If saved model artefacts already exist on disk (and force_retrain is False)
+    the entire two-process setup is bypassed and results are loaded directly.
     """
+    nn_dp   = _datapath(cfg)
+    ptas_dp = _ptas_datapath(cfg)
+
+    # ── Cache check ───────────────────────────────────────────────────────────
+    # Use saved artefacts when both the PTAS weights and the NN evaluation output
+    # are present.  at.pkl + metrics.txt are sufficient for Table 1;
+    # omega_arrays.pkl is additionally needed for Table 2 (IPTA).
+    at_path      = os.path.join(ptas_dp, "at.pkl")
+    metrics_path = os.path.join(nn_dp,   "metrics.txt")
+    if not force_retrain and os.path.exists(at_path) and os.path.exists(metrics_path):
+        print("  [CACHED] Saved artefacts found — loading from disk, skipping training.")
+        return _load_result_from_disk(cfg, nn_dp, ptas_dp)
+
     ptas_q:   "multiprocessing.Queue[dict]" = multiprocessing.Queue()
     client_q: "multiprocessing.Queue[dict]" = multiprocessing.Queue()
     ready_event = multiprocessing.Event()
@@ -267,6 +356,15 @@ def run_poisoned_scenario(
 
     client_proc.join(timeout=60)
     ptas_proc.join(timeout=60)
+
+    # Terminate any subprocess that didn't finish within the join window.
+    # Without this, Python's multiprocessing atexit blocks indefinitely on
+    # non-daemon processes that are still running (e.g. stuck in eval_plot
+    # or waiting for a client message after the queue timeout fires).
+    for proc in (client_proc, ptas_proc):
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=10)
 
     if "error" in ptas_res:
         print(f"  [PTAS ERROR] {ptas_res['error']}")
@@ -357,11 +455,12 @@ def compute_ipta_results(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_poisoned_sweep(
-    patch_sizes: list[int] = PATCH_SIZES,
-    epochs:      int       = _DEFAULT_EPOCHS,
-    hidden_dim:  int       = _HIDDEN_DIM,
-    base_port:   int       = _BASE_PORT,
-    ipta_patch:  int       = IPTA_PATCH_SIZE,
+    patch_sizes:   list[int] = PATCH_SIZES,
+    epochs:        int       = _DEFAULT_EPOCHS,
+    hidden_dim:    int       = _HIDDEN_DIM,
+    base_port:     int       = _BASE_PORT,
+    ipta_patch:    int       = IPTA_PATCH_SIZE,
+    force_retrain: bool      = False,
 ) -> tuple[list[dict[str, Any]], dict[str, tuple[float, float, float]] | None]:
     """Run all patch-size scenarios sequentially."""
     sweep_results: list[dict[str, Any]] = []
@@ -376,7 +475,7 @@ def run_poisoned_sweep(
         print(f"  Poisoned MNIST  |  patch={ps}×{ps}  |  port={cfg.port}")
         print(f"{'='*64}")
 
-        result = run_poisoned_scenario(cfg)
+        result = run_poisoned_scenario(cfg, force_retrain=force_retrain)
 
         print(f"  trust(3)={result['trust_for_3']:.4f}  "
               f"trust(6)={result['trust_for_6']:.4f}  "
@@ -567,6 +666,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--port",       type=int, default=_BASE_PORT)
     p.add_argument("--ipta-patch", type=int, default=IPTA_PATCH_SIZE,
                    help=f"Patch size for IPTA table (default: {IPTA_PATCH_SIZE})")
+    p.add_argument("--force-retrain", action="store_true", default=False,
+                   help="Ignore saved artefacts and retrain from scratch")
     return p.parse_args()
 
 
@@ -581,7 +682,7 @@ def main() -> None:
             port=args.port,
             epochs=args.epochs,
         )
-        result = run_poisoned_scenario(cfg)
+        result = run_poisoned_scenario(cfg, force_retrain=args.force_retrain)
         print_table1([result])
 
         if result["omega_arrays"] is not None:
@@ -607,6 +708,7 @@ def main() -> None:
         hidden_dim=args.hidden_dim,
         base_port=args.port,
         ipta_patch=args.ipta_patch,
+        force_retrain=args.force_retrain,
     )
 
     print_table1(sweep_results)
