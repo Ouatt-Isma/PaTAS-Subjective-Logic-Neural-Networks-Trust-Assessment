@@ -202,7 +202,7 @@ def _read_metrics(metrics_path: str) -> dict[str, float]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _ptas_worker(cfg: TestCaseConfig, result_queue: "multiprocessing.Queue[dict]",
-                 ready_event=None) -> None:
+                 ready_event=None, force_retrain: bool = False) -> None:
     """
     PTAS server subprocess.
     Runs start_ptas(cfg) — which writes evaluation files and returns the
@@ -211,20 +211,21 @@ def _ptas_worker(cfg: TestCaseConfig, result_queue: "multiprocessing.Queue[dict]
     ``ready_event`` is set by run_chunk() once the socket is bound/listening.
     """
     try:
-        ptas = start_ptas(cfg, ready_event=ready_event)
+        ptas = start_ptas(cfg, ready_event=ready_event, force_retrain=force_retrain)
         trust_mass = compute_trust_mass(ptas, cfg.input_dim) if ptas is not None else float("nan")
         result_queue.put({"trust_mass": trust_mass})
     except Exception as exc:
         result_queue.put({"trust_mass": float("nan"), "error": str(exc)})
 
 
-def _client_worker(cfg: TestCaseConfig, result_queue: "multiprocessing.Queue[dict]") -> None:
+def _client_worker(cfg: TestCaseConfig, result_queue: "multiprocessing.Queue[dict]",
+                   force_retrain: bool = False) -> None:
     """
     NN client subprocess.
     Runs start_client(cfg), then reads the metrics.txt written by training.
     """
     try:
-        start_client(cfg, not_ptas=False)
+        start_client(cfg, not_ptas=False, force_retrain=force_retrain)
         datapath = (
             f"results/NN_Train_{cfg.dataset}_{cfg.hidden_dim}"
             f"_{cfg.x_trust}_{cfg.y_trust}_PathSize_None"
@@ -238,7 +239,7 @@ def _client_worker(cfg: TestCaseConfig, result_queue: "multiprocessing.Queue[dic
 # Single-scenario runner
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_scenario(cfg: TestCaseConfig) -> dict[str, Any]:
+def run_scenario(cfg: TestCaseConfig, force_retrain: bool = False) -> dict[str, Any]:
     """
     Launch PTAS server + NN client in separate processes, wait for both to
     finish, and return a result dict with trust_mass, train_acc, test_acc.
@@ -250,12 +251,16 @@ def run_scenario(cfg: TestCaseConfig) -> dict[str, Any]:
     client_q: "multiprocessing.Queue[dict]" = multiprocessing.Queue()
     ready_event = multiprocessing.Event()
 
-    ptas_proc = multiprocessing.Process(target=_ptas_worker, args=(cfg, ptas_q, ready_event))
+    ptas_proc = multiprocessing.Process(
+        target=_ptas_worker, args=(cfg, ptas_q, ready_event, force_retrain)
+    )
     ptas_proc.start()
 
     ready_event.wait(timeout=60)
 
-    client_proc = multiprocessing.Process(target=_client_worker, args=(cfg, client_q))
+    client_proc = multiprocessing.Process(
+        target=_client_worker, args=(cfg, client_q, force_retrain)
+    )
     client_proc.start()
 
     # Read queues BEFORE joining to avoid Windows pipe-buffer deadlock
@@ -289,10 +294,15 @@ def _run_one(
     nn_cache: "dict[tuple, dict[str, float]]",
     *,
     label: str,
+    force_retrain: bool = False,
 ) -> "tuple[dict[str, Any], dict[str, float]]":
     """
     Run a single (cfg, epsilon) scenario, re-using cached NN accuracy when
     available (NN accuracy is epsilon-independent).
+
+    When ``force_retrain=True`` the in-memory nn_cache is bypassed and both
+    PTAS and NN are retrained from scratch (``force_retrain`` is forwarded to
+    ``start_ptas`` / ``start_client``).
 
     Returns ``(result_dict, updated_nn_cache_entry)``.
     """
@@ -301,17 +311,21 @@ def _run_one(
 
     print(f"\n  ► {label}")
 
-    if nn_key in nn_cache:
+    if not force_retrain and nn_key in nn_cache:
         # Only re-run PTAS; reuse cached NN accuracy
         ptas_q: "multiprocessing.Queue[dict]" = multiprocessing.Queue()
         ready_event = multiprocessing.Event()
-        ptas_proc = multiprocessing.Process(target=_ptas_worker, args=(cfg, ptas_q, ready_event))
+        ptas_proc = multiprocessing.Process(
+            target=_ptas_worker, args=(cfg, ptas_q, ready_event, force_retrain)
+        )
         ptas_proc.start()
 
         ready_event.wait(timeout=60)
 
         client_q: "multiprocessing.Queue[dict]" = multiprocessing.Queue()
-        client_proc = multiprocessing.Process(target=_client_worker, args=(cfg, client_q))
+        client_proc = multiprocessing.Process(
+            target=_client_worker, args=(cfg, client_q, force_retrain)
+        )
         client_proc.start()
 
         # Read queue BEFORE joining (Windows pipe deadlock prevention)
@@ -325,7 +339,7 @@ def _run_one(
         ptas_proc.join(timeout=60)
     else:
         # Full run (PTAS + NN)
-        result_full  = run_scenario(cfg)
+        result_full  = run_scenario(cfg, force_retrain=force_retrain)
         ptas_result  = {"trust_mass": result_full["trust_mass"]}
         client_result = {
             "train_acc": result_full["train_acc"],
@@ -353,6 +367,7 @@ def run_all_scenarios(
     epochs: int = 15,
     port: int = _DEFAULT_PORT,
     epsilons: list[float] | None = None,
+    force_retrain: bool = False,
 ) -> list[dict[str, Any]]:
     """
     Run the full scenario sweep and return a flat list of result dicts.
@@ -386,7 +401,7 @@ def run_all_scenarios(
             cfg = make_cancer_cfg(xtrust, ytrust, epsilon_low=eps,
                                   epochs=epochs, port=port)
             lbl = f"x={xtrust:<8}  y={ytrust:<8}  ε={eps}"
-            result, _ = _run_one(cfg, nn_cache, label=lbl)
+            result, _ = _run_one(cfg, nn_cache, label=lbl, force_retrain=force_retrain)
             result["group"] = "grid"
             results.append(result)
             time.sleep(2)
@@ -408,7 +423,7 @@ def run_all_scenarios(
                 port      = port,
             )
             lbl = f"{sc['label']:<22}  ε={eps}  — {sc['desc']}"
-            result, _ = _run_one(cfg, nn_cache, label=lbl)
+            result, _ = _run_one(cfg, nn_cache, label=lbl, force_retrain=force_retrain)
             result["group"] = "extra"
             results.append(result)
             time.sleep(2)
@@ -610,18 +625,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-round", type=int, default=None,
                    help="Stop PTAS after N batches (quick test)")
     p.add_argument("--no-ptas", action="store_true", help="Baseline NN without PTAS")
+    p.add_argument("--force-retrain", action="store_true",
+                   help="Ignore cached NN/PTAS weights and retrain from scratch")
     return p.parse_args()
 
 
-def _run_simple(cfg: TestCaseConfig, not_ptas: bool = False) -> None:
+def _run_simple(cfg: TestCaseConfig, not_ptas: bool = False,
+                force_retrain: bool = False) -> None:
     """Two-process runner for single-scenario CLI use (no result capture)."""
     if not_ptas:
-        start_client(cfg, not_ptas=True)
+        start_client(cfg, not_ptas=True, force_retrain=force_retrain)
         return
-    ptas_proc = multiprocessing.Process(target=start_ptas, args=(cfg,))
+    ptas_proc = multiprocessing.Process(
+        target=start_ptas, kwargs={"cfg": cfg, "force_retrain": force_retrain}
+    )
     ptas_proc.start()
     time.sleep(1)
-    client_proc = multiprocessing.Process(target=start_client, args=(cfg, False))
+    client_proc = multiprocessing.Process(
+        target=start_client, args=(cfg, False, force_retrain)
+    )
     client_proc.start()
     client_proc.join()
     ptas_proc.join()
@@ -641,7 +663,8 @@ def main() -> None:
     # ── Full sweep ────────────────────────────────────────────────────────────
     if not single_run:
         print("\nNo single-scenario flags → running full 9×2 scenario sweep.\n")
-        results = run_all_scenarios(epochs=args.epochs, port=args.port)
+        results = run_all_scenarios(epochs=args.epochs, port=args.port,
+                                    force_retrain=args.force_retrain)
         print_results_table(results)
         return
 
@@ -661,11 +684,11 @@ def main() -> None:
     print(f"{'='*64}\n")
 
     if args.mode == "server":
-        start_ptas(cfg)
+        start_ptas(cfg, force_retrain=args.force_retrain)
     elif args.mode == "client":
-        start_client(cfg, not_ptas=args.no_ptas)
+        start_client(cfg, not_ptas=args.no_ptas, force_retrain=args.force_retrain)
     else:
-        result = run_scenario(cfg)
+        result = run_scenario(cfg, force_retrain=args.force_retrain)
         print(f"\n{'='*64}")
         print("  Single-scenario results")
         print(f"{'='*64}")
