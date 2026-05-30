@@ -20,6 +20,8 @@ Table 2 — IPTA results for NN trained on 4×4-poisoned dataset:
     Clean 6                       |
     6 with patch (all trusted Tx) |
     6 with patch (patch distrust) |
+    3 with patch (all trusted Tx) |
+    3 with patch (patch distrust) |
 
 Trust for class c = feedforward output trust at neuron c when input is fully trusted.
 IPTA = GenIPTA(activated_neurons)(Tx)   — computed offline after training.
@@ -164,7 +166,7 @@ def _read_metrics(path: str) -> dict[str, float]:
 def _read_ipta_paths(path: str) -> dict[str, Any] | None:
     """
     Read the ipta_paths.json written by start_client() for the poisoned case.
-    Returns dict with keys 'clean_3', 'clean_6', 'pois_6' → activation lists.
+    Returns dict with keys 'clean_3', 'clean_6', 'pois_6', 'pois_3' → activation lists.
     """
     try:
         with open(path, encoding="utf-8") as f:
@@ -208,6 +210,7 @@ def _ptas_worker(
     cfg: TestCaseConfig,
     result_queue: "multiprocessing.Queue[dict]",
     ready_event=None,
+    force_retrain: bool = False,
 ) -> None:
     """
     Run start_ptas() (mirrors the 'server' mode in main.py).
@@ -247,7 +250,7 @@ def _ptas_worker(
             _result_sent[0] = True
 
     try:
-        start_ptas(cfg, ready_event=ready_event, post_training_callback=_post_training)
+        start_ptas(cfg, ready_event=ready_event, post_training_callback=_post_training, force_retrain=force_retrain)
     except Exception as exc:
         if not _result_sent[0]:
             import traceback
@@ -264,6 +267,7 @@ def _ptas_worker(
 def _client_worker(
     cfg: TestCaseConfig,
     result_queue: "multiprocessing.Queue[dict]",
+    force_retrain: bool = False,
 ) -> None:
     """
     Run start_client() (mirrors the 'client' mode in main.py).
@@ -272,7 +276,7 @@ def _client_worker(
       • ipta_paths.json — activation lists for IPTA (written by start_client())
     """
     try:
-        start_client(cfg, not_ptas=False)
+        start_client(cfg, not_ptas=False, force_retrain=force_retrain)
         dp = _datapath(cfg)
         metrics = _read_metrics(os.path.join(dp, "metrics.txt"))
         result_queue.put({
@@ -328,13 +332,13 @@ def run_poisoned_scenario(
     ready_event = multiprocessing.Event()
 
     ptas_proc = multiprocessing.Process(
-        target=_ptas_worker, args=(cfg, ptas_q, ready_event)
+        target=_ptas_worker, args=(cfg, ptas_q, ready_event, force_retrain)
     )
     ptas_proc.start()
     ready_event.wait(timeout=60)   # wait for PTAS socket to bind
 
     client_proc = multiprocessing.Process(
-        target=_client_worker, args=(cfg, client_q)
+        target=_client_worker, args=(cfg, client_q, force_retrain)
     )
     client_proc.start()
 
@@ -443,12 +447,16 @@ def compute_ipta_results(
         agg = ipta_fn(tx)   # (3,): [trust, distrust, uncertainty]
         return float(agg[0]), float(agg[1]), float(agg[2])
 
-    return {
+    result = {
         "clean_3":         _ipta(inference_paths["clean_3"], Tx_trusted),
         "clean_6":         _ipta(inference_paths["clean_6"], Tx_trusted),
         "pois_6_trusted":  _ipta(inference_paths["pois_6"],  Tx_trusted),
         "pois_6_distrust": _ipta(inference_paths["pois_6"],  Tx_patch),
     }
+    if "pois_3" in inference_paths:
+        result["pois_3_trusted"]  = _ipta(inference_paths["pois_3"], Tx_trusted)
+        result["pois_3_distrust"] = _ipta(inference_paths["pois_3"], Tx_patch)
+    return result
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Full sweep
@@ -599,6 +607,10 @@ def print_table2(
          _pct(base.get("acc_pois_6",  float("nan"))), "pois_6_trusted"),
         (f"6 with {ipta_patch}×{ipta_patch} patch (patch distrusted)",
          _pct(base.get("acc_pois_6",  float("nan"))), "pois_6_distrust"),
+        (f"3 with {ipta_patch}×{ipta_patch} patch (all trusted Tx)",
+         _pct(base.get("acc_pois_3",  float("nan"))), "pois_3_trusted"),
+        (f"3 with {ipta_patch}×{ipta_patch} patch (patch distrusted)",
+         _pct(base.get("acc_pois_3",  float("nan"))), "pois_3_distrust"),
     ]
 
     for label, acc_str, key in row_defs:
@@ -629,7 +641,10 @@ def test_poisoned_patch4():
         if ipta_paths is not None:
             structure = [cfg.input_dim, _HIDDEN_DIM, cfg.output_dim]
             ipta = compute_ipta_results(result["omega_arrays"], ipta_paths, 4, structure)
-            for key in ("clean_3", "clean_6", "pois_6_trusted", "pois_6_distrust"):
+            for key in ("clean_3", "clean_6", "pois_6_trusted", "pois_6_distrust",
+                        "pois_3_trusted", "pois_3_distrust"):
+                if key not in ipta:
+                    continue
                 t, d, u = ipta[key]
                 assert t + d + u <= 1.01, f"IPTA opinion sums > 1: {key} = ({t},{d},{u})"
 
