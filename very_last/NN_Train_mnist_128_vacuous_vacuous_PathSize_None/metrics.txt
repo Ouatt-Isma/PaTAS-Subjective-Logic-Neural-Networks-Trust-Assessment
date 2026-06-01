@@ -1,0 +1,6 @@
+Train: 0.6777666666666666
+Test: 0.9205
+Poisoned Images 6: nan
+Clean Images 6: nan
+Poisoned Images 3: nan
+Clean Images 3: nan
