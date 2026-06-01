@@ -166,7 +166,8 @@ def _read_metrics(path: str) -> dict[str, float]:
 def _read_ipta_paths(path: str) -> dict[str, Any] | None:
     """
     Read the ipta_paths.json written by start_client() for the poisoned case.
-    Returns dict with keys 'clean_3', 'clean_6', 'pois_6', 'pois_3' → activation lists.
+    Returns dict with keys 'clean_3', 'clean_6', 'pois_6', 'pois_3' → activation lists
+    and 'probs_clean_3', 'probs_clean_6', 'probs_pois_6', 'probs_pois_3' → softmax probs.
     """
     try:
         with open(path, encoding="utf-8") as f:
@@ -325,6 +326,17 @@ def run_poisoned_scenario(
     metrics_path = os.path.join(nn_dp,   "metrics.txt")
     if not force_retrain and os.path.exists(at_path) and os.path.exists(metrics_path):
         print("  [CACHED] Saved artefacts found — loading from disk, skipping training.")
+        if cfg.mnist_poisoned_soph:
+            ipta_json_path = os.path.join(nn_dp, "ipta_paths.json")
+            try:
+                with open(ipta_json_path, encoding="utf-8") as _f:
+                    _existing = json.load(_f)
+                _needs_refresh = "probs_clean_3" not in _existing
+            except (FileNotFoundError, json.JSONDecodeError):
+                _needs_refresh = True
+            if _needs_refresh:
+                print("  [IPTA] ipta_paths.json outdated — refreshing probabilities ...")
+                start_client(cfg, not_ptas=True, force_retrain=False)
         return _load_result_from_disk(cfg, nn_dp, ptas_dp)
 
     ptas_q:   "multiprocessing.Queue[dict]" = multiprocessing.Queue()
@@ -402,24 +414,21 @@ def compute_ipta_results(
     patch_size:      int,
     structure:       list[int],
     input_dim:       int = 784,
-) -> dict[str, tuple[float, float, float]]:
+) -> tuple[dict[str, tuple[float, float, float]], ...]:
     """
-    Reconstruct a PTAS from omega_arrays (saved by _ptas_worker) and compute
-    IPTA outputs for four evaluation rows.
+    Reconstruct a PTAS from omega_arrays and compute IPTA outputs for all rows.
 
-    inference_paths keys:
-        'clean_3'  — activation list for a clean class-3 sample
-        'clean_6'  — activation list for a clean class-6 sample
-        'pois_6'   — activation list for a poisoned class-6 sample
-
-    Returns {row_key: (trust, distrust, uncertainty)}.
+    Returns (by_class, aggregate, weighted) — three dicts keyed by row name,
+    each mapping to a (trust, distrust, uncertainty) triple.
+      by_class  — opinion at the true-class output neuron
+      aggregate — PTASClass.aggregation() over all output neurons
+      weighted  — Σ p_c · opinion_c using NN softmax probabilities
     """
     from concrete.TensorTO import TensorArrayTO
     from concrete.ArrayTO import ArrayTO
     from concrete.TrustOpinion import TrustOpinion
     from NN.PTAStemplate import PTAS as PTASClass
 
-    # Reconstruct PTAS offline (omega_arrays are already (n, m, 3) tensors)
     omega_tensors = [TensorArrayTO(arr) for arr in omega_arrays]
     ptas_recon = PTASClass(
         omega_thetas=omega_tensors,
@@ -433,30 +442,49 @@ def compute_ipta_results(
         use_tensor=True,
     )
 
-    # All pixels fully trusted
     Tx_trusted = ArrayTO(TrustOpinion.fill((1, input_dim), method="trust"))
 
-    # All pixels trusted EXCEPT the trigger patch (top-left patch_size × patch_size)
     Tx_patch = ArrayTO(TrustOpinion.fill((1, input_dim), method="trust"))
     for i in range(patch_size):
         for j in range(patch_size):
             Tx_patch.value[0][28 * i + j] = TrustOpinion.dtrust()
 
-    def _ipta(path, tx):
+    def _ipta_all(path, tx, cls_idx, probs):
         ipta_fn = ptas_recon.GenIPTA(path)
-        agg = ipta_fn(tx)   # (3,): [trust, distrust, uncertainty]
-        return float(agg[0]), float(agg[1]), float(agg[2])
+        output  = ipta_fn(tx)               # TensorArrayTO (1, n_out, 3)
+        v       = output.value[0]           # (n_out, 3)
+        v_cls   = v[cls_idx]
+        cls_op  = (float(v_cls[0]), float(v_cls[1]), float(v_cls[2]))
+        agg_v   = PTASClass.aggregation(output)   # (3,) numpy array
+        agg_op  = (float(agg_v[0]), float(agg_v[1]), float(agg_v[2]))
+        if probs is not None:
+            p    = np.array(probs, dtype=np.float64).flatten()
+            w    = (p[:, None] * v).sum(axis=0)
+            w_op = (float(w[0]), float(w[1]), float(w[2]))
+        else:
+            w_op = (float("nan"), float("nan"), float("nan"))
+        return cls_op, agg_op, w_op
 
-    result = {
-        "clean_3":         _ipta(inference_paths["clean_3"], Tx_trusted),
-        "clean_6":         _ipta(inference_paths["clean_6"], Tx_trusted),
-        "pois_6_trusted":  _ipta(inference_paths["pois_6"],  Tx_trusted),
-        "pois_6_distrust": _ipta(inference_paths["pois_6"],  Tx_patch),
-    }
+    by_class:  dict[str, tuple[float, float, float]] = {}
+    aggregate: dict[str, tuple[float, float, float]] = {}
+    weighted:  dict[str, tuple[float, float, float]] = {}
+
+    rows = [
+        ("clean_3",         inference_paths["clean_3"], Tx_trusted, 3, inference_paths.get("probs_clean_3")),
+        ("clean_6",         inference_paths["clean_6"], Tx_trusted, 6, inference_paths.get("probs_clean_6")),
+        ("pois_6_trusted",  inference_paths["pois_6"],  Tx_trusted, 6, inference_paths.get("probs_pois_6")),
+        ("pois_6_distrust", inference_paths["pois_6"],  Tx_patch,   6, inference_paths.get("probs_pois_6")),
+    ]
     if "pois_3" in inference_paths:
-        result["pois_3_trusted"]  = _ipta(inference_paths["pois_3"], Tx_trusted)
-        result["pois_3_distrust"] = _ipta(inference_paths["pois_3"], Tx_patch)
-    return result
+        rows += [
+            ("pois_3_trusted",  inference_paths["pois_3"], Tx_trusted, 3, inference_paths.get("probs_pois_3")),
+            ("pois_3_distrust", inference_paths["pois_3"], Tx_patch,   3, inference_paths.get("probs_pois_3")),
+        ]
+
+    for key, path, tx, cls_idx, probs in rows:
+        by_class[key], aggregate[key], weighted[key] = _ipta_all(path, tx, cls_idx, probs)
+
+    return by_class, aggregate, weighted
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Full sweep
@@ -469,7 +497,7 @@ def run_poisoned_sweep(
     base_port:     int       = _BASE_PORT,
     ipta_patch:    int       = IPTA_PATCH_SIZE,
     force_retrain: bool      = False,
-) -> tuple[list[dict[str, Any]], dict[str, tuple[float, float, float]] | None]:
+) -> tuple[list[dict[str, Any]], tuple[dict, dict, dict] | None]:
     """Run all patch-size scenarios sequentially."""
     sweep_results: list[dict[str, Any]] = []
     ipta_rows = None
@@ -559,15 +587,74 @@ def print_table1(sweep_results: list[dict[str, Any]]) -> None:
     print()
 
 
+def plot_table2a(
+    by_class:   dict[str, tuple[float, float, float]],
+    patch_size: int,
+    save_path:  str,
+) -> None:
+    """Save a grouped bar chart of Table 2a (by-class opinion) as a PDF."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as _np
+
+    row_defs = [
+        ("Clean 3",                                    "clean_3"),
+        ("Clean 6",                                    "clean_6"),
+        (f"6 w/ patch (trusted Tx)",                   "pois_6_trusted"),
+        (f"6 w/ patch (patch distrusted)",             "pois_6_distrust"),
+        (f"3 w/ patch (trusted Tx)",                   "pois_3_trusted"),
+        (f"3 w/ patch (patch distrusted)",             "pois_3_distrust"),
+    ]
+
+    labels = [r[0] for r in row_defs]
+    keys   = [r[1] for r in row_defs]
+
+    trust_vals   = [by_class.get(k, (float("nan"),)*3)[0] for k in keys]
+    distrust_vals= [by_class.get(k, (float("nan"),)*3)[1] for k in keys]
+    uncert_vals  = [by_class.get(k, (float("nan"),)*3)[2] for k in keys]
+
+    x      = _np.arange(len(labels))
+    width  = 0.25
+    fig, ax = plt.subplots(figsize=(11, 5))
+
+    ax.bar(x - width, trust_vals,    width, label="Trust",       color="#4C72B0")
+    ax.bar(x,         distrust_vals, width, label="Distrust",    color="#DD8452")
+    ax.bar(x + width, uncert_vals,   width, label="Uncertainty", color="#55A868")
+
+    ax.set_ylabel("Opinion mass")
+    ax.set_title(f"Table 2a — IPTA by-class opinion  ({patch_size}×{patch_size} patch)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=15, ha="right", fontsize=9)
+    ax.set_ylim(0, 1.05)
+    ax.legend()
+    ax.grid(axis="y", linestyle="--", alpha=0.4)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+    print(f"  [plot] Table 2a histogram saved → {save_path}")
+
+
 def print_table2(
     sweep_results: list[dict[str, Any]],
-    ipta_rows:     dict[str, tuple[float, float, float]] | None,
+    ipta_rows:     dict[str, tuple[float, float, float]] | tuple | None,
     ipta_patch:    int = IPTA_PATCH_SIZE,
 ) -> None:
     def _pct(v: float) -> str:
         return f"{v*100:6.2f}%" if v == v else "  N/A  "
     def _f4(v: float) -> str:
         return f"{v:.4f}" if v == v else " N/A  "
+
+    # Unpack 3-tuple (by_class, aggregate, weighted) or fall back gracefully
+    if isinstance(ipta_rows, tuple) and len(ipta_rows) == 3:
+        ipta_by_class, ipta_agg, ipta_weighted = ipta_rows
+    elif isinstance(ipta_rows, tuple) and len(ipta_rows) == 2:
+        ipta_by_class, ipta_agg = ipta_rows
+        ipta_weighted = None
+    elif isinstance(ipta_rows, dict):
+        ipta_by_class, ipta_agg, ipta_weighted = ipta_rows, None, None
+    else:
+        ipta_by_class = ipta_agg = ipta_weighted = None
 
     base: dict[str, float] = {}
     for r in sweep_results:
@@ -585,18 +672,7 @@ def print_table2(
     print("=" * len(sep))
     print(f"  MNIST POISONED — IPTA Results for {ipta_patch}×{ipta_patch} patch (Table 2)")
     print("  IPTA = GenIPTA(activated_neurons)(Tx)  [computed offline after training]")
-    print("  Rows 1–3: fully-trusted Tx   |  Row 4: patch pixels distrusted")
     print("=" * len(sep))
-    print()
-
-    if ipta_rows is None:
-        print("  [IPTA data unavailable]")
-        print()
-        return
-
-    print(sep)
-    print(row_fmt.format(*headers))
-    print(sep)
 
     row_defs = [
         ("Clean 3",
@@ -613,12 +689,33 @@ def print_table2(
          _pct(base.get("acc_pois_3",  float("nan"))), "pois_3_distrust"),
     ]
 
-    for label, acc_str, key in row_defs:
-        t, d, u = ipta_rows.get(key, (float("nan"), float("nan"), float("nan")))
-        print(row_fmt.format(label, acc_str, _f4(t), _f4(d), _f4(u)))
+    def _print_sub(title, data):
+        print()
+        print(f"  {title}")
+        if data is None:
+            print("  [data unavailable]")
+            return
+        print(sep)
+        print(row_fmt.format(*headers))
+        print(sep)
+        for label, acc_str, key in row_defs:
+            t, d, u = data.get(key, (float("nan"), float("nan"), float("nan")))
+            print(row_fmt.format(label, acc_str, _f4(t), _f4(d), _f4(u)))
+        print(sep)
 
-    print(sep)
+    _print_sub("Table 2a — per-class output neuron opinion  (output at true-class neuron)", ipta_by_class)
+    _print_sub("Table 2b — aggregated opinion  (PTASClass.aggregation over all neurons)", ipta_agg)
+    _print_sub("Table 2c — NN-softmax-weighted opinion  (Σ p_c · opinion_c)", ipta_weighted)
     print()
+
+    # Generate histogram PDF for Table 2a
+    if ipta_by_class is not None:
+        plot_dir  = base.get("datapath", "results")
+        save_path = os.path.join(plot_dir, "ipta_table2a.pdf")
+        try:
+            plot_table2a(ipta_by_class, ipta_patch, save_path)
+        except Exception as _e:
+            print(f"  [plot] Table 2a histogram failed: {_e}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # pytest integration tests
@@ -640,12 +737,13 @@ def test_poisoned_patch4():
         ipta_paths = _read_ipta_paths(os.path.join(result["datapath"], "ipta_paths.json"))
         if ipta_paths is not None:
             structure = [cfg.input_dim, _HIDDEN_DIM, cfg.output_dim]
-            ipta = compute_ipta_results(result["omega_arrays"], ipta_paths, 4, structure)
+            ipta_rows = compute_ipta_results(result["omega_arrays"], ipta_paths, 4, structure)
+            by_class, *_ = ipta_rows
             for key in ("clean_3", "clean_6", "pois_6_trusted", "pois_6_distrust",
                         "pois_3_trusted", "pois_3_distrust"):
-                if key not in ipta:
+                if key not in by_class:
                     continue
-                t, d, u = ipta[key]
+                t, d, u = by_class[key]
                 assert t + d + u <= 1.01, f"IPTA opinion sums > 1: {key} = ({t},{d},{u})"
 
 
