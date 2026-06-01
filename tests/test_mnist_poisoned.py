@@ -269,6 +269,7 @@ def _client_worker(
     cfg: TestCaseConfig,
     result_queue: "multiprocessing.Queue[dict]",
     force_retrain: bool = False,
+    not_ptas: bool = False,
 ) -> None:
     """
     Run start_client() (mirrors the 'client' mode in main.py).
@@ -277,7 +278,7 @@ def _client_worker(
       • ipta_paths.json — activation lists for IPTA (written by start_client())
     """
     try:
-        start_client(cfg, not_ptas=False, force_retrain=force_retrain)
+        start_client(cfg, not_ptas=not_ptas, force_retrain=force_retrain)
         dp = _datapath(cfg)
         metrics = _read_metrics(os.path.join(dp, "metrics.txt"))
         result_queue.put({
@@ -305,6 +306,7 @@ def _client_worker(
 def run_poisoned_scenario(
     cfg: TestCaseConfig,
     force_retrain: bool = False,
+    not_ptas: bool = False,
 ) -> dict[str, Any]:
     """
     Launch PTAS + NN client for one poisoned-MNIST scenario.
@@ -314,6 +316,9 @@ def run_poisoned_scenario(
 
     If saved model artefacts already exist on disk (and force_retrain is False)
     the entire two-process setup is bypassed and results are loaded directly.
+
+    If not_ptas is True, only the NN client is run (no PTAS server).
+    Trust / omega values will be NaN / None in the returned dict.
     """
     nn_dp   = _datapath(cfg)
     ptas_dp = _ptas_datapath(cfg)
@@ -324,7 +329,11 @@ def run_poisoned_scenario(
     # omega_arrays.pkl is additionally needed for Table 2 (IPTA).
     at_path      = os.path.join(ptas_dp, "at.pkl")
     metrics_path = os.path.join(nn_dp,   "metrics.txt")
-    if not force_retrain and os.path.exists(at_path) and os.path.exists(metrics_path):
+    cache_hit = (
+        not force_retrain and os.path.exists(metrics_path)
+        and (not_ptas or os.path.exists(at_path))
+    )
+    if cache_hit:
         print("  [CACHED] Saved artefacts found — loading from disk, skipping training.")
         if cfg.mnist_poisoned_soph:
             ipta_json_path = os.path.join(nn_dp, "ipta_paths.json")
@@ -339,48 +348,66 @@ def run_poisoned_scenario(
                 start_client(cfg, not_ptas=True, force_retrain=False)
         return _load_result_from_disk(cfg, nn_dp, ptas_dp)
 
-    ptas_q:   "multiprocessing.Queue[dict]" = multiprocessing.Queue()
     client_q: "multiprocessing.Queue[dict]" = multiprocessing.Queue()
-    ready_event = multiprocessing.Event()
-
-    ptas_proc = multiprocessing.Process(
-        target=_ptas_worker, args=(cfg, ptas_q, ready_event, force_retrain)
-    )
-    ptas_proc.start()
-    ready_event.wait(timeout=60)   # wait for PTAS socket to bind
-
-    client_proc = multiprocessing.Process(
-        target=_client_worker, args=(cfg, client_q, force_retrain)
-    )
-    client_proc.start()
-
-    # ── Read from queues BEFORE joining ──────────────────────────────────────
-    # MNIST training (128-dim, 20 epochs) can take ~2 hours;
-    # use 7200 s timeout. The PTAS queue payload is ~1 MB (omega_arrays) which
-    # can block a subprocess on Windows until the parent drains the pipe.
     _QUEUE_TIMEOUT = 7200
-    try:
-        ptas_res = ptas_q.get(timeout=_QUEUE_TIMEOUT)
-    except Exception as e:
-        print(f"  [PTAS queue timeout/error] {e}")
+
+    if not_ptas:
+        # NN-only mode: skip the PTAS server entirely
         ptas_res = {}
-    try:
-        client_res = client_q.get(timeout=_QUEUE_TIMEOUT)
-    except Exception as e:
-        print(f"  [CLIENT queue timeout/error] {e}")
-        client_res = {}
+        client_proc = multiprocessing.Process(
+            target=_client_worker, args=(cfg, client_q, force_retrain, True)
+        )
+        client_proc.start()
+        try:
+            client_res = client_q.get(timeout=_QUEUE_TIMEOUT)
+        except Exception as e:
+            print(f"  [CLIENT queue timeout/error] {e}")
+            client_res = {}
+        client_proc.join(timeout=60)
+        if client_proc.is_alive():
+            client_proc.terminate()
+            client_proc.join(timeout=10)
+    else:
+        ptas_q:   "multiprocessing.Queue[dict]" = multiprocessing.Queue()
+        ready_event = multiprocessing.Event()
 
-    client_proc.join(timeout=60)
-    ptas_proc.join(timeout=60)
+        ptas_proc = multiprocessing.Process(
+            target=_ptas_worker, args=(cfg, ptas_q, ready_event, force_retrain)
+        )
+        ptas_proc.start()
+        ready_event.wait(timeout=60)   # wait for PTAS socket to bind
 
-    # Terminate any subprocess that didn't finish within the join window.
-    # Without this, Python's multiprocessing atexit blocks indefinitely on
-    # non-daemon processes that are still running (e.g. stuck in eval_plot
-    # or waiting for a client message after the queue timeout fires).
-    for proc in (client_proc, ptas_proc):
-        if proc.is_alive():
-            proc.terminate()
-            proc.join(timeout=10)
+        client_proc = multiprocessing.Process(
+            target=_client_worker, args=(cfg, client_q, force_retrain)
+        )
+        client_proc.start()
+
+        # ── Read from queues BEFORE joining ──────────────────────────────────
+        # MNIST training (128-dim, 20 epochs) can take ~2 hours;
+        # use 7200 s timeout. The PTAS queue payload is ~1 MB (omega_arrays) which
+        # can block a subprocess on Windows until the parent drains the pipe.
+        try:
+            ptas_res = ptas_q.get(timeout=_QUEUE_TIMEOUT)
+        except Exception as e:
+            print(f"  [PTAS queue timeout/error] {e}")
+            ptas_res = {}
+        try:
+            client_res = client_q.get(timeout=_QUEUE_TIMEOUT)
+        except Exception as e:
+            print(f"  [CLIENT queue timeout/error] {e}")
+            client_res = {}
+
+        client_proc.join(timeout=60)
+        ptas_proc.join(timeout=60)
+
+        # Terminate any subprocess that didn't finish within the join window.
+        # Without this, Python's multiprocessing atexit blocks indefinitely on
+        # non-daemon processes that are still running (e.g. stuck in eval_plot
+        # or waiting for a client message after the queue timeout fires).
+        for proc in (client_proc, ptas_proc):
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=10)
 
     if "error" in ptas_res:
         print(f"  [PTAS ERROR] {ptas_res['error']}")
@@ -497,6 +524,7 @@ def run_poisoned_sweep(
     base_port:     int       = _BASE_PORT,
     ipta_patch:    int       = IPTA_PATCH_SIZE,
     force_retrain: bool      = False,
+    not_ptas:      bool      = False,
 ) -> tuple[list[dict[str, Any]], tuple[dict, dict, dict] | None]:
     """Run all patch-size scenarios sequentially."""
     sweep_results: list[dict[str, Any]] = []
@@ -511,7 +539,7 @@ def run_poisoned_sweep(
         print(f"  Poisoned MNIST  |  patch={ps}×{ps}  |  port={cfg.port}")
         print(f"{'='*64}")
 
-        result = run_poisoned_scenario(cfg, force_retrain=force_retrain)
+        result = run_poisoned_scenario(cfg, force_retrain=force_retrain, not_ptas=not_ptas)
 
         print(f"  trust(3)={result['trust_for_3']:.4f}  "
               f"trust(6)={result['trust_for_6']:.4f}  "
@@ -525,7 +553,7 @@ def run_poisoned_sweep(
         sweep_results.append(result)
 
         # Compute IPTA offline for the target patch size
-        if ps == ipta_patch and result["omega_arrays"] is not None:
+        if not not_ptas and ps == ipta_patch and result["omega_arrays"] is not None:
             ipta_paths = _read_ipta_paths(
                 os.path.join(result["datapath"], "ipta_paths.json")
             )
@@ -601,10 +629,10 @@ def plot_table2a(
     row_defs = [
         ("Clean 3",                                    "clean_3"),
         ("Clean 6",                                    "clean_6"),
-        (f"6 w/ patch (trusted Tx)",                   "pois_6_trusted"),
-        (f"6 w/ patch (patch distrusted)",             "pois_6_distrust"),
-        (f"3 w/ patch (trusted Tx)",                   "pois_3_trusted"),
-        (f"3 w/ patch (patch distrusted)",             "pois_3_distrust"),
+        (f"6 w/ patch",                   "pois_6_trusted"),
+        # (f"6 w/ patch (patch distrusted)",             "pois_6_distrust"),
+        (f"3 w/ patch",                   "pois_3_trusted"),
+        # (f"3 w/ patch (patch distrusted)",             "pois_3_distrust"),
     ]
 
     labels = [r[0] for r in row_defs]
@@ -618,21 +646,85 @@ def plot_table2a(
     width  = 0.25
     fig, ax = plt.subplots(figsize=(11, 5))
 
-    ax.bar(x - width, trust_vals,    width, label="Trust",       color="#4C72B0")
-    ax.bar(x,         distrust_vals, width, label="Distrust",    color="#DD8452")
-    ax.bar(x + width, uncert_vals,   width, label="Uncertainty", color="#55A868")
+    bars_t = ax.bar(x - width, trust_vals,    width, label="Trust",       color="#4C72B0")
+    bars_d = ax.bar(x,         distrust_vals, width, label="Distrust",    color="#DD8452")
+    bars_u = ax.bar(x + width, uncert_vals,   width, label="Uncertainty", color="#55A868")
+
+    for bars in (bars_t, bars_d, bars_u):
+        for bar in bars:
+            v = bar.get_height()
+            if v == v:  # skip NaN
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2, v + 0.01,
+                    f"{v:.2f}", ha="center", va="bottom", fontsize=7, rotation=90,
+                )
 
     ax.set_ylabel("Opinion mass")
-    ax.set_title(f"Table 2a — IPTA by-class opinion  ({patch_size}×{patch_size} patch)")
+    ax.set_title(f"IPTA by-class opinion  ({patch_size}×{patch_size} patch)")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=15, ha="right", fontsize=9)
-    ax.set_ylim(0, 1.05)
+    ax.set_ylim(0, 1.2)
     ax.legend()
     ax.grid(axis="y", linestyle="--", alpha=0.4)
     fig.tight_layout()
     fig.savefig(save_path, dpi=150)
     plt.close(fig)
     print(f"  [plot] Table 2a histogram saved → {save_path}")
+
+
+def plot_trust_2a_vs_2c(
+    by_class:  dict[str, tuple[float, float, float]],
+    weighted:  dict[str, tuple[float, float, float]],
+    patch_size: int,
+    save_path:  str,
+) -> None:
+    """Save a grouped bar chart comparing trust mass from Table 2a and Table 2c."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as _np
+
+    row_defs = [
+        ("Clean 3",                          "clean_3"),
+        ("Clean 6",                          "clean_6"),
+        (f"6 w/ patch",         "pois_6_trusted"),
+        # (f"6 w/ patch (patch distrusted)",   "pois_6_distrust"),
+        (f"3 w/ patch",         "pois_3_trusted"),
+        # (f"3 w/ patch (patch distrusted)",   "pois_3_distrust"),
+    ]
+
+    labels      = [r[0] for r in row_defs]
+    keys        = [r[1] for r in row_defs]
+    trust_2a    = [by_class.get(k, (float("nan"),)*3)[0] for k in keys]
+    trust_2c    = [weighted.get(k, (float("nan"),)*3)[0] for k in keys]
+
+    x     = _np.arange(len(labels))
+    width = 0.35
+    fig, ax = plt.subplots(figsize=(11, 5))
+
+    bars_a = ax.bar(x - width / 2, trust_2a, width, label="per-class neuron", color="#4C72B0")
+    bars_c = ax.bar(x + width / 2, trust_2c, width, label="softmax-weighted", color="#C44E52")
+
+    for bars in (bars_a, bars_c):
+        for bar in bars:
+            v = bar.get_height()
+            if v == v:  # skip NaN
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2, v + 0.01,
+                    f"{v:.2f}", ha="center", va="bottom", fontsize=7, rotation=90,
+                )
+
+    ax.set_ylabel("Trust mass")
+    ax.set_title(f"IPTA trust mass — Table 2a vs 2c  ({patch_size}×{patch_size} patch)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=15, ha="right", fontsize=9)
+    ax.set_ylim(0, 1.2)
+    ax.legend()
+    ax.grid(axis="y", linestyle="--", alpha=0.4)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+    print(f"  [plot] Trust 2a vs 2c histogram saved → {save_path}")
 
 
 def print_table2(
@@ -717,6 +809,15 @@ def print_table2(
         except Exception as _e:
             print(f"  [plot] Table 2a histogram failed: {_e}")
 
+    # Generate trust-only comparison plot (Table 2a vs Table 2c)
+    if ipta_by_class is not None and ipta_weighted is not None:
+        plot_dir  = base.get("datapath", "results")
+        save_path = os.path.join(plot_dir, "ipta_trust_2a_vs_2c.pdf")
+        try:
+            plot_trust_2a_vs_2c(ipta_by_class, ipta_weighted, ipta_patch, save_path)
+        except Exception as _e:
+            print(f"  [plot] Trust 2a vs 2c histogram failed: {_e}")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # pytest integration tests
 # ─────────────────────────────────────────────────────────────────────────────
@@ -737,13 +838,12 @@ def test_poisoned_patch4():
         ipta_paths = _read_ipta_paths(os.path.join(result["datapath"], "ipta_paths.json"))
         if ipta_paths is not None:
             structure = [cfg.input_dim, _HIDDEN_DIM, cfg.output_dim]
-            ipta_rows = compute_ipta_results(result["omega_arrays"], ipta_paths, 4, structure)
-            by_class, *_ = ipta_rows
+            ipta = compute_ipta_results(result["omega_arrays"], ipta_paths, 4, structure)
             for key in ("clean_3", "clean_6", "pois_6_trusted", "pois_6_distrust",
                         "pois_3_trusted", "pois_3_distrust"):
-                if key not in by_class:
+                if key not in ipta:
                     continue
-                t, d, u = by_class[key]
+                t, d, u = ipta[key]
                 assert t + d + u <= 1.01, f"IPTA opinion sums > 1: {key} = ({t},{d},{u})"
 
 
@@ -781,6 +881,8 @@ def parse_args() -> argparse.Namespace:
                    help=f"Patch size for IPTA table (default: {IPTA_PATCH_SIZE})")
     p.add_argument("--force-retrain", action="store_true", default=False,
                    help="Ignore saved artefacts and retrain from scratch")
+    p.add_argument("--not-ptas", action="store_true", default=False,
+                   help="Run the NN only — skip the PTAS server, trust/IPTA outputs will be N/A")
     return p.parse_args()
 
 
@@ -795,10 +897,11 @@ def main() -> None:
             port=args.port,
             epochs=args.epochs,
         )
-        result = run_poisoned_scenario(cfg, force_retrain=args.force_retrain)
+        result = run_poisoned_scenario(cfg, force_retrain=args.force_retrain,
+                                        not_ptas=args.not_ptas)
         print_table1([result])
 
-        if result["omega_arrays"] is not None:
+        if not args.not_ptas and result["omega_arrays"] is not None:
             ipta_paths = _read_ipta_paths(
                 os.path.join(result["datapath"], "ipta_paths.json")
             )
@@ -822,10 +925,12 @@ def main() -> None:
         base_port=args.port,
         ipta_patch=args.ipta_patch,
         force_retrain=args.force_retrain,
+        not_ptas=args.not_ptas,
     )
 
     print_table1(sweep_results)
-    print_table2(sweep_results, ipta_rows, ipta_patch=args.ipta_patch)
+    if not args.not_ptas:
+        print_table2(sweep_results, ipta_rows, ipta_patch=args.ipta_patch)
     print("=== Poisoned MNIST test complete ===\n")
 
 
