@@ -75,7 +75,7 @@ except ImportError:  # pytest not installed — mark decorators become no-ops
 # ── Scenario constants ────────────────────────────────────────────────────────
 TRUST_SPECS: list[str] = ["trust", "vacuous", "distrust"]
 EPSILONS: list[float] = [0.1, 0.01]
-_DEFAULT_PORT = 5030
+_DEFAULT_PORT = 5031
 
 # Two extra scenarios beyond the standard 3×3 grid.
 # Each entry is a dict of keyword arguments forwarded to make_cancer_cfg.
@@ -92,9 +92,9 @@ EXTRA_SCENARIOS: list[dict[str, Any]] = [
     {
         "label":     "mild_degradation",
         "x_trust":   "0.25,0.0,0.75",
-        "y_trust":   "trust",
+        "y_trust":   "0.25,0.0,0.75",
         "x_dataset": "noise_mild",  # features perturbed with noise_prob=0.15
-        "y_dataset": "clean",
+        "y_dataset": "noise_mild",
         "desc":      "(0.25,0,0.75) assessment on mildly degraded features (p=0.15)",
     },
 ]
