@@ -402,7 +402,7 @@ def compute_ipta_results(
     patch_size:      int,
     structure:       list[int],
     input_dim:       int = 784,
-) -> tuple[dict[str, tuple[float, float, float]], dict[str, tuple[float, float, float]]]:
+) -> dict[str, tuple[float, float, float]]:
     """
     Reconstruct a PTAS from omega_arrays (saved by _ptas_worker) and compute
     IPTA outputs for four evaluation rows.
@@ -412,9 +412,7 @@ def compute_ipta_results(
         'clean_6'  — activation list for a clean class-6 sample
         'pois_6'   — activation list for a poisoned class-6 sample
 
-    Returns (by_class, aggregate):
-        by_class  — {row_key: (t, d, u)} opinion at the true-label output neuron
-        aggregate — {row_key: (t, d, u)} mean opinion over all output neurons
+    Returns {row_key: (trust, distrust, uncertainty)}.
     """
     from concrete.TensorTO import TensorArrayTO
     from concrete.ArrayTO import ArrayTO
@@ -436,7 +434,7 @@ def compute_ipta_results(
     )
 
     # All pixels fully trusted
-    Tx_trusted = ArrayTO(TrustOpinion.fill((1, input_dim), method="mtrust"))
+    Tx_trusted = ArrayTO(TrustOpinion.fill((1, input_dim), method="trust"))
 
     # All pixels trusted EXCEPT the trigger patch (top-left patch_size × patch_size)
     Tx_patch = ArrayTO(TrustOpinion.fill((1, input_dim), method="trust"))
@@ -444,35 +442,21 @@ def compute_ipta_results(
         for j in range(patch_size):
             Tx_patch.value[0][28 * i + j] = TrustOpinion.dtrust()
 
-    def _ipta_both(path, tx, cls_idx):
-        """One GenIPTA call → two results: per-class and aggregate."""
+    def _ipta(path, tx):
         ipta_fn = ptas_recon.GenIPTA(path)
-        output = ipta_fn(tx)                        # TensorArrayTO (1, n_output, 3)
-        v_cls = output.value[0, cls_idx, :]         # opinion at target class neuron
-        agg_v = PTASClass.aggregation(output)        # mean over all output neurons (3,)
-        cls_op = (float(v_cls[0]), float(v_cls[1]), float(v_cls[2]))
-        agg_op = (float(agg_v[0]), float(agg_v[1]), float(agg_v[2]))
-        return cls_op, agg_op
+        agg = ipta_fn(tx)   # (3,): [trust, distrust, uncertainty]
+        return float(agg[0]), float(agg[1]), float(agg[2])
 
-    by_class:  dict[str, tuple[float, float, float]] = {}
-    aggregate: dict[str, tuple[float, float, float]] = {}
-
-    for key, path, tx, cls_idx in [
-        ("clean_3",         inference_paths["clean_3"], Tx_trusted, 3),
-        ("clean_6",         inference_paths["clean_6"], Tx_trusted, 6),
-        ("pois_6_trusted",  inference_paths["pois_6"],  Tx_trusted, 6),
-        ("pois_6_distrust", inference_paths["pois_6"],  Tx_patch,   6),
-    ]:
-        by_class[key], aggregate[key] = _ipta_both(path, tx, cls_idx)
-
+    result = {
+        "clean_3":         _ipta(inference_paths["clean_3"], Tx_trusted),
+        "clean_6":         _ipta(inference_paths["clean_6"], Tx_trusted),
+        "pois_6_trusted":  _ipta(inference_paths["pois_6"],  Tx_trusted),
+        "pois_6_distrust": _ipta(inference_paths["pois_6"],  Tx_patch),
+    }
     if "pois_3" in inference_paths:
-        for key, path, tx, cls_idx in [
-            ("pois_3_trusted",  inference_paths["pois_3"], Tx_trusted, 3),
-            ("pois_3_distrust", inference_paths["pois_3"], Tx_patch,   3),
-        ]:
-            by_class[key], aggregate[key] = _ipta_both(path, tx, cls_idx)
-
-    return by_class, aggregate
+        result["pois_3_trusted"]  = _ipta(inference_paths["pois_3"], Tx_trusted)
+        result["pois_3_distrust"] = _ipta(inference_paths["pois_3"], Tx_patch)
+    return result
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Full sweep
@@ -485,7 +469,7 @@ def run_poisoned_sweep(
     base_port:     int       = _BASE_PORT,
     ipta_patch:    int       = IPTA_PATCH_SIZE,
     force_retrain: bool      = False,
-) -> tuple[list[dict[str, Any]], tuple[dict, dict] | None]:
+) -> tuple[list[dict[str, Any]], dict[str, tuple[float, float, float]] | None]:
     """Run all patch-size scenarios sequentially."""
     sweep_results: list[dict[str, Any]] = []
     ipta_rows = None
@@ -535,75 +519,8 @@ def run_poisoned_sweep(
     return sweep_results, ipta_rows
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Table printers & plots
+# Table printers
 # ─────────────────────────────────────────────────────────────────────────────
-
-def plot_table2a(
-    by_class:   dict[str, tuple[float, float, float]],
-    base:       dict[str, Any],
-    patch_size: int,
-    save_path:  str,
-) -> None:
-    """
-    Grouped bar chart for Table 2a (opinion at true-label class neuron).
-    Groups = sample types; bars = Trust / Distrust / Uncertainty.
-    Saves a PDF to save_path.
-    """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
-    import numpy as _np
-
-    row_keys = [
-        ("clean_3",        f"Clean 3\n({base.get('acc_clean_3', float('nan'))*100:.1f}%)"),
-        ("clean_6",        f"Clean 6\n({base.get('acc_clean_6', float('nan'))*100:.1f}%)"),
-        ("pois_6_trusted", f"6+patch\ntrusted Tx\n({base.get('acc_pois_6', float('nan'))*100:.1f}%)"),
-        # ("pois_6_distrust",f"6+patch\npatch dist.\n({base.get('acc_pois_6', float('nan'))*100:.1f}%)"),
-        ("pois_3_trusted", f"3+patch\ntrusted Tx\n({base.get('acc_pois_3', float('nan'))*100:.1f}%)"),
-        # ("pois_3_distrust",f"3+patch\npatch dist.\n({base.get('acc_pois_3', float('nan'))*100:.1f}%)"),
-    ]
-    # keep only rows present in by_class
-    row_keys = [(k, lbl) for k, lbl in row_keys if k in by_class]
-    if not row_keys:
-        return
-
-    keys   = [k   for k, _ in row_keys]
-    labels = [lbl for _, lbl in row_keys]
-    n      = len(keys)
-    ts = [by_class[k][0] for k in keys]
-    ds = [by_class[k][1] for k in keys]
-    us = [by_class[k][2] for k in keys]
-
-    x      = _np.arange(n)
-    width  = 0.25
-    colors = {"Trust": "#2196F3", "Distrust": "#F44336", "Uncertainty": "#9E9E9E"}
-
-    fig, ax = plt.subplots(figsize=(max(7, n * 1.4), 4.5))
-    ax.bar(x - width, ts, width, label="Trust",       color=colors["Trust"])
-    ax.bar(x,         ds, width, label="Distrust",    color=colors["Distrust"])
-    ax.bar(x + width, us, width, label="Uncertainty", color=colors["Uncertainty"])
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=8)
-    ax.set_ylabel("Opinion mass")
-    ax.set_ylim(0, 1.05)
-    ax.set_title(
-        f"Table 2a — IPTA opinion at true-label neuron  "
-        f"({patch_size}×{patch_size} patch, trust–trust training)"
-    )
-    ax.legend(handles=[
-        mpatches.Patch(color=colors["Trust"],       label="Trust"),
-        mpatches.Patch(color=colors["Distrust"],    label="Distrust"),
-        mpatches.Patch(color=colors["Uncertainty"], label="Uncertainty"),
-    ], loc="upper right", fontsize=9)
-    ax.yaxis.grid(True, linestyle="--", alpha=0.5)
-    ax.set_axisbelow(True)
-
-    fig.tight_layout()
-    fig.savefig(save_path, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  [IPTA plot] saved → {save_path}")
 
 def print_table1(sweep_results: list[dict[str, Any]]) -> None:
     def _pct(v: float) -> str:
@@ -644,30 +561,13 @@ def print_table1(sweep_results: list[dict[str, Any]]) -> None:
 
 def print_table2(
     sweep_results: list[dict[str, Any]],
-    ipta_rows:     "tuple | dict | None",
+    ipta_rows:     dict[str, tuple[float, float, float]] | None,
     ipta_patch:    int = IPTA_PATCH_SIZE,
 ) -> None:
-    """
-    Print two IPTA sub-tables:
-      Table 2a — opinion at the true-label class neuron
-      Table 2b — mean opinion averaged over all output neurons
-    ipta_rows may be:
-      tuple (by_class_dict, aggregate_dict)  — new API from compute_ipta_results
-      dict                                   — legacy single-table format
-      None                                   — unavailable
-    """
     def _pct(v: float) -> str:
         return f"{v*100:6.2f}%" if v == v else "  N/A  "
     def _f4(v: float) -> str:
         return f"{v:.4f}" if v == v else " N/A  "
-
-    # Unpack: new API is (by_class, aggregate); legacy is just a dict.
-    if isinstance(ipta_rows, tuple):
-        ipta_by_class, ipta_agg = ipta_rows
-    elif isinstance(ipta_rows, dict):
-        ipta_by_class, ipta_agg = ipta_rows, None
-    else:
-        ipta_by_class, ipta_agg = None, None
 
     base: dict[str, float] = {}
     for r in sweep_results:
@@ -685,8 +585,18 @@ def print_table2(
     print("=" * len(sep))
     print(f"  MNIST POISONED — IPTA Results for {ipta_patch}×{ipta_patch} patch (Table 2)")
     print("  IPTA = GenIPTA(activated_neurons)(Tx)  [computed offline after training]")
-    print("  Trusted Tx = all pixels trusted  |  patch Tx = patch pixels distrusted")
+    print("  Rows 1–3: fully-trusted Tx   |  Row 4: patch pixels distrusted")
     print("=" * len(sep))
+    print()
+
+    if ipta_rows is None:
+        print("  [IPTA data unavailable]")
+        print()
+        return
+
+    print(sep)
+    print(row_fmt.format(*headers))
+    print(sep)
 
     row_defs = [
         ("Clean 3",
@@ -703,28 +613,11 @@ def print_table2(
          _pct(base.get("acc_pois_3",  float("nan"))), "pois_3_distrust"),
     ]
 
-    def _print_sub(title: str, rows_data: "dict | None") -> None:
-        print()
-        print(f"  {title}")
-        print(sep)
-        print(row_fmt.format(*headers))
-        print(sep)
-        if rows_data is None:
-            print("  [data unavailable]")
-        else:
-            for label, acc_str, key in row_defs:
-                t, d, u = rows_data.get(key, (float("nan"), float("nan"), float("nan")))
-                print(row_fmt.format(label, acc_str, _f4(t), _f4(d), _f4(u)))
-        print(sep)
+    for label, acc_str, key in row_defs:
+        t, d, u = ipta_rows.get(key, (float("nan"), float("nan"), float("nan")))
+        print(row_fmt.format(label, acc_str, _f4(t), _f4(d), _f4(u)))
 
-    _print_sub(
-        "Table 2a — opinion at true-label class neuron  (3→neuron-3, 6→neuron-6)",
-        ipta_by_class,
-    )
-    _print_sub(
-        "Table 2b — mean opinion over all output neurons",
-        ipta_agg,
-    )
+    print(sep)
     print()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -747,14 +640,13 @@ def test_poisoned_patch4():
         ipta_paths = _read_ipta_paths(os.path.join(result["datapath"], "ipta_paths.json"))
         if ipta_paths is not None:
             structure = [cfg.input_dim, _HIDDEN_DIM, cfg.output_dim]
-            by_class, aggregate = compute_ipta_results(result["omega_arrays"], ipta_paths, 4, structure)
-            for rows in (by_class, aggregate):
-                for key in ("clean_3", "clean_6", "pois_6_trusted", "pois_6_distrust",
-                            "pois_3_trusted", "pois_3_distrust"):
-                    if key not in rows:
-                        continue
-                    t, d, u = rows[key]
-                    assert t + d + u <= 1.01, f"IPTA opinion sums > 1: {key} = ({t},{d},{u})"
+            ipta = compute_ipta_results(result["omega_arrays"], ipta_paths, 4, structure)
+            for key in ("clean_3", "clean_6", "pois_6_trusted", "pois_6_distrust",
+                        "pois_3_trusted", "pois_3_distrust"):
+                if key not in ipta:
+                    continue
+                t, d, u = ipta[key]
+                assert t + d + u <= 1.01, f"IPTA opinion sums > 1: {key} = ({t},{d},{u})"
 
 
 @pytest.mark.integration
@@ -819,13 +711,6 @@ def main() -> None:
                     args.patch_size, structure, cfg.input_dim,
                 )
                 print_table2([result], ipta_rows, ipta_patch=args.patch_size)
-                by_class, _ = ipta_rows
-                plot_table2a(
-                    by_class,
-                    base=result,
-                    patch_size=args.patch_size,
-                    save_path=os.path.join(result["datapath"], "ipta_table2a.pdf"),
-                )
         return
 
     # Full sweep
@@ -843,20 +728,6 @@ def main() -> None:
 
     print_table1(sweep_results)
     print_table2(sweep_results, ipta_rows, ipta_patch=args.ipta_patch)
-
-    if isinstance(ipta_rows, tuple):
-        by_class, _ = ipta_rows
-        base = next((r for r in sweep_results if r["patch_size"] == args.ipta_patch), {})
-        plot_table2a(
-            by_class,
-            base=base,
-            patch_size=args.ipta_patch,
-            save_path=os.path.join(
-                base.get("datapath", "results"),
-                "ipta_table2a.pdf",
-            ),
-        )
-
     print("=== Poisoned MNIST test complete ===\n")
 
 
