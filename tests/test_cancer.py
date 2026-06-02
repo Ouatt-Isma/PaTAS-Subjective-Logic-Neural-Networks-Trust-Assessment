@@ -74,7 +74,7 @@ except ImportError:  # pytest not installed — mark decorators become no-ops
 
 # ── Scenario constants ────────────────────────────────────────────────────────
 TRUST_SPECS: list[str] = ["trust", "vacuous", "distrust"]
-EPSILONS: list[float] = [0.1, 0.01]
+EPSILONS: list[float] = [1, 0.1, 0.01, 0.001]
 _DEFAULT_PORT = 5031
 
 # Two extra scenarios beyond the standard 3×3 grid.

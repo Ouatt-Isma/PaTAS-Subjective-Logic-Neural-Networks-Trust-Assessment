@@ -84,6 +84,7 @@ SCENARIOS: list[dict[str, Any]] = [
     {"hidden_dims": (16, 16), "x_trust": "vacuous", "y_trust": "vacuous"},
     # trust/trust — 16 neurons
     {"hidden_dims": (16,),    "x_trust": "trust",   "y_trust": "trust"},
+    {"hidden_dims": (16, 16), "x_trust": "trust",   "y_trust": "trust"},
 ]
 
 _BASE_PORT     = 5041   # ports 5041–5046 (one per scenario; 5040 is reserved/occupied)
