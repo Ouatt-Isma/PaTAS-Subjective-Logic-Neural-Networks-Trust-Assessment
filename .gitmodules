@@ -1,0 +1,3 @@
+[submodule "patas_module"]
+	path = patas_module
+	url = https://github.com/Ouatt-Isma/PaTAS-Module.git
