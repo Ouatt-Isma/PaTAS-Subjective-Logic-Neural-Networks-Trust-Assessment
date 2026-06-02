@@ -564,8 +564,8 @@ def test_cancer_partial_uncertain():
 def test_cancer_mild_degradation():
     """Cancer: (0.25,0,0.75) assessment on mildly-degraded features (noise_prob=0.15)."""
     cfg = make_cancer_cfg(
-        x_trust="0.25,0.0,0.75", y_trust="trust",
-        x_dataset="noise_mild", y_dataset="clean",
+        x_trust="0.25,0.0,0.75", y_trust="0.25,0.0,0.75",
+        x_dataset="noise_mild", y_dataset="noise_mild",
         epsilon_low=0.1, epochs=2, port=5025,
     )
     result = run_scenario(cfg)
