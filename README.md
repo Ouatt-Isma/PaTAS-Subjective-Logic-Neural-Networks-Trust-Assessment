@@ -67,7 +67,7 @@ python main.py --list
 | `poisoned_mnist.py` | Experiment 3 — Tables 7.4-7.5 (sklearn digits proxy) |
 | `gtsrb.py` | Experiment 4 — Balancing Bias (§6.5, Ref. [5]) |
 | `cifar10h.py` | Experiment 5 — Labeling Bias (§6.6, Ref. [6]) |
-| `data/` | Real 5G CSVs (BSinfo.csv, CLstat.csv, ECstat.csv) |
+| `data/` | Real 5G CSVs (BSinfo.csv, CLstat.csv, ECstat.csv) — field descriptions in [`data/README.md`](data/README.md) |
 
 **Standalone evaluation and plot scripts** (require `matplotlib`):
 
@@ -81,7 +81,8 @@ python main.py --list
 | `plot_effectiveness_hardcoded.py` | Reproduces the effectiveness figure from hardcoded table data |
 | `plot_latency_hardcoded.py` | Reproduces the latency figure from hardcoded table data |
 | `external_bridge.py` | Adapter layer connecting the eval scripts to the `patas_module` implementation |
-| `patas_module/` | Full socket-based PaTAS implementation used by the eval scripts |
+| `tex.py` | Collects result PDFs into `latex/filelist.tex` for the dissertation figure bundle |
+| `patas_module/` | Full socket-based PaTAS implementation used by the eval scripts — see [`patas_module/readme.md`](patas_module/readme.md) |
 
 ## What each experiment reproduces
 
