@@ -27,6 +27,7 @@ Trust for class c = feedforward output trust at neuron c when input is fully tru
 IPTA = GenIPTA(activated_neurons)(Tx)   — computed offline after training.
 """
 
+
 from __future__ import annotations
 
 import os
@@ -625,6 +626,9 @@ def plot_table2a(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as _np
+    plt.rcParams.update({
+    'font.size': 16,  
+    })
 
     row_defs = [
         ("Clean 3",                                    "clean_3"),
@@ -656,13 +660,13 @@ def plot_table2a(
             if v == v:  # skip NaN
                 ax.text(
                     bar.get_x() + bar.get_width() / 2, v + 0.01,
-                    f"{v:.2f}", ha="center", va="bottom", fontsize=7, rotation=90,
+                    f"{v:.2f}", ha="center", va="bottom", fontsize=16, rotation=90,
                 )
 
     ax.set_ylabel("Opinion mass")
     ax.set_title(f"IPTA by-class opinion  ({patch_size}×{patch_size} patch)")
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=15, ha="right", fontsize=9)
+    ax.set_xticklabels(labels, rotation=15, ha="right", fontsize=16)
     ax.set_ylim(0, 1.2)
     ax.legend()
     ax.grid(axis="y", linestyle="--", alpha=0.4)
@@ -711,13 +715,13 @@ def plot_trust_2a_vs_2c(
             if v == v:  # skip NaN
                 ax.text(
                     bar.get_x() + bar.get_width() / 2, v + 0.01,
-                    f"{v:.2f}", ha="center", va="bottom", fontsize=7, rotation=90,
+                    f"{v:.2f}", ha="center", va="bottom", fontsize=16, rotation=90,
                 )
 
     ax.set_ylabel("Trust mass")
     ax.set_title(f"IPTA trust mass — Table 2a vs 2c  ({patch_size}×{patch_size} patch)")
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=15, ha="right", fontsize=9)
+    ax.set_xticklabels(labels, rotation=15, ha="right", fontsize=16)
     ax.set_ylim(0, 1.2)
     ax.legend()
     ax.grid(axis="y", linestyle="--", alpha=0.4)
