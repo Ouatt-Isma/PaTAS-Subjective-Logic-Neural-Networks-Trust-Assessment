@@ -12,6 +12,21 @@ gradient and activation is directly visible to the trust machinery, as
 required by Algorithm 5 (Trust Feedforward) and Algorithm 6
 (Parameter-Trust Update).
 
+## Cloning
+
+`patas_module` is a git submodule. Use one of the following:
+
+```bash
+# Clone everything in one command (recommended):
+git clone --recurse-submodules https://github.com/Ouatt-Isma/PaTAS-Subjective-Logic-Neural-Networks-Trust-Assessment.git
+
+# Or, after a plain clone, initialise the submodule separately:
+git submodule update --init
+```
+
+> Run `git submodule update --init` from the **repository root**, not from inside
+> the `patas_module/` directory.
+
 ## Requirements
 
 ```bash
