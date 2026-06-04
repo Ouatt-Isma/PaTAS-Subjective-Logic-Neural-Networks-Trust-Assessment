@@ -13,12 +13,10 @@ Two components are measured independently:
 (B) Training latency
 --------------------
     Wall-clock time for one full training run (N_BENCH_EPOCHS epochs)
-    without PaTAS vs with PaTAS (PTAS + NN in separate processes).
+    without PaTAS vs with PaTAS, measured in-process (no socket overhead).
     Repeated N_TRAIN_TRIALS times; mean ± std is reported.
-    Three noise conditions are benchmarked:
-        clean   (sigma=0.0, flip=0.0)
-        feature (sigma=0.3, flip=0.0)
-        combined(sigma=0.3, flip=0.15)
+    Clean condition only (sigma=0.0, flip=0.0) — noise does not affect
+    computational complexity.
 
 Outputs
 -------
@@ -54,12 +52,12 @@ import numpy as np
 
 plt.rcParams.update({
     "font.family":       "serif",
-    "font.size":         16,
-    "axes.titlesize":    16,
-    "axes.labelsize":    16,
-    "legend.fontsize":   16,
-    "xtick.labelsize":   16,
-    "ytick.labelsize":   16,
+    "font.size":         14,
+    "axes.titlesize":    14,
+    "axes.labelsize":    14,
+    "legend.fontsize":   14,
+    "xtick.labelsize":   14,
+    "ytick.labelsize":   14,
     "axes.spines.top":   False,
     "axes.spines.right": False,
     "figure.dpi":        150,
@@ -102,6 +100,76 @@ def _softmax(x: np.ndarray) -> np.ndarray:
 
 def _nn_forward(W1, b1, W2, b2, X: np.ndarray) -> np.ndarray:
     return _softmax(_relu(X @ W1 + b1) @ W2 + b2)
+
+
+def _run_nn_inprocess(X, y_oh, W1, b1, W2, b2, epochs, batch_size, lr):
+    """Standalone NN training loop (no PTAS) for in-process timing."""
+    W1, b1, W2, b2 = W1.copy(), b1.copy(), W2.copy(), b2.copy()
+    for _ in range(epochs):
+        for i in range(0, X.shape[0], batch_size):
+            Xb = X[i:i + batch_size]
+            yb = y_oh[i:i + batch_size]
+            z1 = Xb @ W1 + b1
+            a1 = _relu(z1)
+            a2 = _softmax(a1 @ W2 + b2)
+            m = Xb.shape[0]
+            dz2 = a2 - yb
+            dW2 = a1.T @ dz2 / m
+            db2 = dz2.sum(axis=0, keepdims=True) / m
+            da1 = dz2 @ W2.T
+            dz1 = da1 * (z1 > 0).astype(np.float32)
+            dW1 = Xb.T @ dz1 / m
+            db1 = dz1.sum(axis=0, keepdims=True) / m
+            W1 -= lr * dW1; b1 -= lr * db1
+            W2 -= lr * dW2; b2 -= lr * db2
+
+
+def _run_ptas_inprocess(X, y_oh, W1, b1, W2, b2, ptas, total_rounds, epochs, batch_size, lr):
+    """NN+PTAS training loop in a single process — no socket or subprocess overhead."""
+    from patas_module.PTASTemp.messageObject import MessageObject
+    from patas_module.PTASTemp.mode import Mode
+
+    W1, b1, W2, b2 = W1.copy(), b1.copy(), W2.copy(), b2.copy()
+    ptas.start_training(total_rounds)
+
+    for epoch in range(epochs):
+        for i_batch, i in enumerate(range(0, X.shape[0], batch_size)):
+            Xb = X[i:i + batch_size]
+            yb = y_oh[i:i + batch_size]
+            batch_indices = np.arange(i, min(i + batch_size, X.shape[0]))
+
+            ptas.process_data(MessageObject(
+                Mode.TRAINING_FEEDFORWARD,
+                {"X": batch_indices, "y": batch_indices},
+                epoch, i_batch,
+            ))
+
+            z1 = Xb @ W1 + b1
+            a1 = _relu(z1)
+            a2 = _softmax(a1 @ W2 + b2)
+            m = Xb.shape[0]
+            dz2 = a2 - yb
+            dW2 = a1.T @ dz2 / m
+            db2 = dz2.sum(axis=0, keepdims=True) / m
+            da1 = dz2 @ W2.T
+            dz1 = da1 * (z1 > 0).astype(np.float32)
+            dW1 = Xb.T @ dz1 / m
+            db1 = dz1.sum(axis=0, keepdims=True) / m
+
+            # Mirror primaryNN.py order: output layer (1) then hidden layer (0)
+            ptas.process_data(MessageObject(
+                Mode.TRAINING_BACKPROPAGATION,
+                {"y_true": yb, "delta_W": dW2.astype(np.float32), "delta_b": db2.astype(np.float32)},
+                epoch, i_batch, _layer=1,
+            ))
+            ptas.process_data(MessageObject(
+                Mode.TRAINING_BACKPROPAGATION,
+                {"y_true": yb, "delta_W": dW1.astype(np.float32), "delta_b": db1.astype(np.float32)},
+                epoch, i_batch, _layer=0,
+            ))
+
+            W1 -= lr * dW1; b1 -= lr * db1
+            W2 -= lr * dW2; b2 -= lr * db2
 
 
 def _time_inference(
@@ -306,6 +374,84 @@ def run_training_benchmark(ds) -> dict:
     return results
 
 
+def run_training_inprocess_benchmark(ds) -> dict:
+    """Part B (in-process) — NN vs NN+PaTAS with no subprocess or socket overhead.
+
+    Isolates the algorithmic cost of PaTAS by calling process_data() directly
+    instead of routing through TCP sockets and OS processes.
+
+    Returns same dict format as run_training_benchmark, keyed by 'clean'.
+    """
+    try:
+        from patas_module.concrete.TensorTO import TensorArrayTO
+        from patas_module.NN.PTAStemplate import PTAS as PTASClass
+        from noise_utils import feature_noise_to_trust
+    except ImportError:
+        print("  [skip] patas_module not available — skipping in-process training benchmark")
+        return {}
+
+    n_classes  = int(ds.y_train.max()) + 1
+    input_dim  = int(ds.X_train.shape[1])
+    X_tr       = ds.X_train.astype(np.float32)
+    y_tr_oh    = np.eye(n_classes, dtype=np.float32)[ds.y_train]
+    n_batches  = (X_tr.shape[0] + BATCH - 1) // BATCH
+    # pbar.update(1) is called twice per batch (once per backprop layer)
+    total_rounds = N_BENCH_EPOCHS * n_batches * 2
+
+    trust_op = feature_noise_to_trust(0.0)
+    bdu = np.array([trust_op.t, trust_op.d, trust_op.u], dtype=np.float32)
+
+    def trust_assessment(x, dim: int):
+        n = int(x) if isinstance(x, (int, np.integer)) else len(x)
+        return TensorArrayTO(np.broadcast_to(bdu, (n, dim, 3)).copy())
+
+    nn_times, ptas_times = [], []
+
+    for trial in range(N_TRAIN_TRIALS):
+        rng = np.random.default_rng(trial)
+        W1  = rng.standard_normal((input_dim, N_HIDDEN)).astype(np.float32) * np.sqrt(2.0 / input_dim)
+        b1  = np.zeros((1, N_HIDDEN), dtype=np.float32)
+        W2  = rng.standard_normal((N_HIDDEN, n_classes)).astype(np.float32) * np.sqrt(2.0 / N_HIDDEN)
+        b2  = np.zeros((1, n_classes), dtype=np.float32)
+
+        print(f"    trial {trial+1}/{N_TRAIN_TRIALS}  [NN] ...", end=" ", flush=True)
+        t0 = time.perf_counter()
+        _run_nn_inprocess(X_tr, y_tr_oh, W1, b1, W2, b2, N_BENCH_EPOCHS, BATCH, LR)
+        t_nn = time.perf_counter() - t0
+        nn_times.append(t_nn)
+        print(f"{t_nn:.1f}s", end="   ", flush=True)
+
+        omega_thetas = [
+            TensorArrayTO(np.full((input_dim + 1, N_HIDDEN,   3), [1.0, 0.0, 0.0], dtype=np.float32)),
+            TensorArrayTO(np.full((N_HIDDEN + 1,  n_classes,  3), [1.0, 0.0, 0.0], dtype=np.float32)),
+        ]
+        ptas = PTASClass(
+            omega_thetas=omega_thetas,
+            operator_mapping=None,
+            nn_interface=None,
+            trust_assessment_func=trust_assessment,
+            structure=[input_dim, N_HIDDEN, n_classes],
+            epsilon_low=EPS_LOW,
+            use_tensor=True,
+        )
+
+        print(f"[PTAS in-proc] ...", end=" ", flush=True)
+        t0 = time.perf_counter()
+        _run_ptas_inprocess(X_tr, y_tr_oh, W1, b1, W2, b2,
+                            ptas, total_rounds, N_BENCH_EPOCHS, BATCH, LR)
+        t_ptas = time.perf_counter() - t0
+        ptas_times.append(t_ptas)
+        print(f"{t_ptas:.1f}s")
+
+    return {
+        "clean": {
+            "sigma": 0.0, "flip": 0.0,
+            "nn":   (np.mean(nn_times),   np.std(nn_times),   np.mean(nn_times)   / N_BENCH_EPOCHS),
+            "ptas": (np.mean(ptas_times), np.std(ptas_times), np.mean(ptas_times) / N_BENCH_EPOCHS),
+        }
+    }
+
+
 # ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
@@ -372,7 +518,7 @@ def _plot_training(ax_top: plt.Axes, ax_bot: plt.Axes, train_results: dict):
     ax_top.set_xticks(x)
     ax_top.set_xticklabels(cond_names, fontsize=9)
     ax_top.set_ylabel(f"Total wall-clock ({N_BENCH_EPOCHS} epochs, s)")
-    ax_top.set_title("Training latency across noise conditions", fontsize=10)
+    ax_top.set_title("Training latency — in-process, clean condition", fontsize=10)
     ax_top.legend()
     ax_top.grid(axis="y", linestyle=":", alpha=0.5, zorder=0)
 
@@ -515,9 +661,9 @@ def latency_analysis(ds, output_dir: str):
     print("\n[A] Inference latency benchmark ...")
     inf_results = run_inference_benchmark(ds.X_test.astype(np.float32), nn_pkl)
 
-    # ---- Part B: Training ----
-    print("\n[B] Training latency benchmark ...")
-    train_results = run_training_benchmark(ds)
+    # ---- Part B: Training (in-process, no socket overhead) ----
+    print("\n[B] Training latency benchmark (in-process) ...")
+    train_results = run_training_inprocess_benchmark(ds)
 
     # ---- Plot ----
     fig, axes = plt.subplots(2, 2, figsize=(13, 7),
@@ -526,7 +672,7 @@ def latency_analysis(ds, output_dir: str):
     _plot_training( axes[0, 1], axes[1, 1], train_results)
 
     fig.suptitle(
-        f"PaTAS latency overhead — inference (left) and training (right, {N_BENCH_EPOCHS} epochs)",
+        f"PaTAS latency overhead — inference (left) and training in-process (right, {N_BENCH_EPOCHS} epochs)",
         fontsize=12,
     )
     fig.tight_layout()
@@ -586,8 +732,8 @@ if __name__ == "__main__":
         inf_results = run_inference_benchmark(ds.X_test.astype(np.float32), nn_pkl)
 
     if not args.inference_only:
-        print("\n[B] Training latency benchmark ...")
-        train_results = run_training_benchmark(ds)
+        print("\n[B] Training latency benchmark (in-process) ...")
+        train_results = run_training_inprocess_benchmark(ds)
 
     # ---- Plot ----
     fig, axes = plt.subplots(2, 2, figsize=(13, 7),
@@ -595,7 +741,7 @@ if __name__ == "__main__":
     _plot_inference(axes[0, 0], axes[1, 0], inf_results)
     _plot_training( axes[0, 1], axes[1, 1], train_results)
     fig.suptitle(
-        f"PaTAS latency overhead — inference (left) and training (right, {N_BENCH_EPOCHS} epochs)",
+        f"PaTAS latency overhead — inference (left) and training in-process (right, {N_BENCH_EPOCHS} epochs)",
         fontsize=12,
     )
     fig.tight_layout()
