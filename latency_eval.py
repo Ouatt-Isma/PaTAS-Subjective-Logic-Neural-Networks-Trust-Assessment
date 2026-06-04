@@ -54,12 +54,12 @@ import numpy as np
 
 plt.rcParams.update({
     "font.family":       "serif",
-    "font.size":         11,
-    "axes.titlesize":    12,
-    "axes.labelsize":    11,
-    "legend.fontsize":   9,
-    "xtick.labelsize":   9,
-    "ytick.labelsize":   9,
+    "font.size":         16,
+    "axes.titlesize":    16,
+    "axes.labelsize":    16,
+    "legend.fontsize":   16,
+    "xtick.labelsize":   16,
+    "ytick.labelsize":   16,
     "axes.spines.top":   False,
     "axes.spines.right": False,
     "figure.dpi":        150,
@@ -83,9 +83,7 @@ LR                = 0.05
 EPS_LOW           = 0.05
 
 TRAIN_CONDITIONS = [
-    ("clean",    0.0, 0.0),
-    ("feature",  0.3, 0.0),
-    ("combined", 0.3, 0.15),
+    ("clean", 0.0, 0.0),
 ]
 
 

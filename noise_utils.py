@@ -109,11 +109,17 @@ def feature_noise_to_trust(sigma_relative: float) -> TrustOpinion:
 
 def label_noise_to_trust(flip_rate: float) -> TrustOpinion:
     """Map a label flip rate to a disbelief-dominated trust opinion."""
+    # if flip_rate == 0.0:
+    #     return TrustOpinion(1.0, 0.0, 0.0)
+    # p = flip_rate
+    # return TrustOpinion(1-p, p, 0)
     if flip_rate == 0.0:
         return TrustOpinion(1.0, 0.0, 0.0)
     p = flip_rate
-    return TrustOpinion(1-p, p, 0)
-
+    u = 0.2 
+    b = (1-p) * (1-u)
+    d = p * (1-u)
+    return TrustOpinion(b, d, u)
 
 # ---------------------------------------------------------------------------
 # Helpers

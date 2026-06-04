@@ -1,0 +1,22 @@
+\begin{table}[ht]
+\centering
+\caption{Trust opinion mapping from noise parameters to subjective opinion $(b, d, u)$.}
+\label{tab:trust-mapping}
+\begin{tabular}{lcccc}
+\toprule
+$\sigma_{rel}$ / flip $p$ & Belief $b$ & Disbelief $d$ & Uncertainty $u$ & Dominant component \\
+\midrule
+\multicolumn{5}{l}{\textit{Feature noise (uncertainty-based)}} \\
+0.00 & 1.0000 & 0.0000 & 0.0000 & b \\
+0.10 & 0.8822 & 0.0980 & 0.0198 & b \\
+0.20 & 0.7385 & 0.1846 & 0.0769 & b \\
+0.30 & 0.5844 & 0.2505 & 0.1651 & b \\
+\midrule \\
+\multicolumn{5}{l}{\textit{Label noise (disbelief-based)}} \\
+0.00 & 1.0000 & 0.0000 & 0.0000 & b \\
+0.05 & 0.7600 & 0.0400 & 0.2000 & b \\
+0.15 & 0.6800 & 0.1200 & 0.2000 & b \\
+0.30 & 0.5600 & 0.2400 & 0.2000 & b \\
+\bottomrule
+\end{tabular}
+\end{table}
