@@ -47,6 +47,6 @@
   ],
   "use_ptas": true,
   "x_trust": "trusted",
-  "y_trust": "b0.500_d0.500_u0.000",
+  "y_trust": "b0.400_d0.400_u0.200",
   "run_label": "data\\ln_0.50_ptas-cal-fb_r2"
 }
