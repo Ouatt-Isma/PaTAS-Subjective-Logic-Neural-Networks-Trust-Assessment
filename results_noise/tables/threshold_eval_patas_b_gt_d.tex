@@ -1,0 +1,13 @@
+\begin{table}[ht]
+\centering
+\caption{Selective prediction: PaTAS belief-over-disbelief filter ($b > d$). Coverage is the fraction of test samples where PaTAS belief exceeds disbelief in the NN's predicted class (net positive subjective evidence). Values are mean $\pm$ std over 1 independent runs.}
+\label{tab:threshold-b-gt-d}
+\begin{tabular}{lccc}
+\toprule
+Noise condition & Coverage (\%) & Accuracy on covered (\%) & Overall accuracy (\%) \\
+\midrule
+\multicolumn{4}{l}{\textit{Feature noise ($T_x$ calibrated to $\sigma_{rel}$)}} \\
+$\sigma_{rel}=0.00$ & 32.6 $\pm$ 0.0 & 90.95 $\pm$ 0.00 & 84.29 \\
+\bottomrule
+\end{tabular}
+\end{table}
