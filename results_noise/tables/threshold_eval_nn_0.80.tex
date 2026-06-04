@@ -1,0 +1,22 @@
+\begin{table}[ht]
+\centering
+\caption{Selective prediction — \textbf{NN softmax baseline}: softmax score $\geq \tau = 0.800$ for the predicted class. Values are mean $\pm$ std over 1 runs.}
+\label{tab:thresh-nn-0-8}
+\begin{tabular}{lccc}
+\toprule
+Noise condition & Coverage (\%) & Accuracy on covered (\%) & Overall accuracy (\%) \\
+\midrule
+\multicolumn{4}{l}{\textit{Feature noise ($T_x$ calibrated to $\sigma_{rel}$)}} \\
+$\sigma_{rel}=0.00$ & 66.1 $\pm$ 0.0 & 93.57 $\pm$ 0.00 & 84.29 \\
+$\sigma_{rel}=0.10$ & 63.7 $\pm$ 0.0 & 93.86 $\pm$ 0.00 & 84.13 \\
+$\sigma_{rel}=0.30$ & 47.6 $\pm$ 0.0 & 94.90 $\pm$ 0.00 & 83.27 \\
+$\sigma_{rel}=0.50$ & 36.9 $\pm$ 0.0 & 95.37 $\pm$ 0.00 & 82.41 \\
+\midrule \\
+\multicolumn{4}{l}{\textit{Label noise ($T_x$ fully trusted)}} \\
+$p=0.30$ & 1.2 $\pm$ 0.0 & 100.00 $\pm$ 0.00 & 83.52 \\
+\midrule \\
+\multicolumn{4}{l}{\textit{Combined noise ($T_x$ calibrated to $\sigma_{rel}$)}} \\
+$\sigma=0.50,\,p=0.30$ & 0.3 $\pm$ 0.0 & 98.04 $\pm$ 0.00 & 81.71 \\
+\bottomrule
+\end{tabular}
+\end{table}

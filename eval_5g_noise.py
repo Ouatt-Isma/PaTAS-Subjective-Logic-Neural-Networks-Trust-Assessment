@@ -76,29 +76,58 @@ plt.rcParams.update({
 })
 
 # Consistent colours across all plots
-_COLORS  = {"nn": "#555555", "ptas-cal-fb": "#8e44ad"}
-_LABELS  = {"nn": "NN (no trust)", "ptas-cal-fb": "NN"}
-_MARKERS = {"nn": "s", "ptas-cal-fb": "P"}
+_COLORS  = {"nn": "#555555", "ptas-obs": "#e07b39", "ptas-cal-fb": "#8e44ad"}
+_LABELS  = {"nn": "NN", "ptas-obs": "PaTAS (observer)", "ptas-cal-fb": "PaTAS"}
+_MARKERS = {"nn": "s", "ptas-obs": "D", "ptas-cal-fb": "P"}
+
+# Colors / labels / markers for coverage-accuracy and threshold plots
+_THR_COLORS  = {
+    "nn":         "#555555",
+    "comb_pi":    "#2980b9",
+    # "comb_bdu":   "#e74c3c",
+    # "comb_b": "#8e44ad",
+    # "comb_bu":   "#1abc9c",
+    # "comb_bd":   "#e07b39",
+}
+_THR_LABELS  = {
+    "nn":         "NN softmax",
+    "comb_b": r"$b$",
+    "comb_bu":   r"$(b{-}u)$",
+    "comb_bdu":   r"$(b{-}d{-}\frac{u}{2})$",
+    "comb_pi":    r"$\pi$  $(b+\frac{u}{2})$",
+    "comb_bd":   r"$(b{-}d)$",
+}
+_THR_MARKERS    = {"nn": "D", "comb_bd": "P", "comb_b": "o",
+                   "comb_bu": "s", "comb_bdu": "^", "comb_pi": "X"}
+_THR_LINESTYLES = {"nn": "-", "comb_bd": "-", "comb_b": "--",
+                   "comb_bu": ":", "comb_bdu": "-.", "comb_pi": "-"}
+_THR_SOURCES = list(_THR_COLORS)
 
 
 # ---------------------------------------------------------------------------
 # Experiment grid definition
 # ---------------------------------------------------------------------------
 
-FEATURE_SIGMAS  = [0, 0.1, 0.3, 0.5]
-LABEL_FLIPS     = [0, 0.05, 0.15, 0.30]
-COMBINED        = [(0.1, 0.05), (0.3, 0.15), (0.5, 0.30)]
-CONFIGS         = ["ptas-cal-fb"]
+FEATURE_SIGMAS  = [0, 0.1, 0.2, 0.3, 0.5, 1.0]
+# LABEL_FLIPS     = [0.30]
+# COMBINED        = [ (0.5, 0.30)]
 
-EPOCHS   = 10
+LABEL_FLIPS     = [0, 0.05, 0.15, 0.30, 0.50, 1.0]
+COMBINED        = [(0.1, 0.05), (0.2, 0.15), (0.30, 0.15), (0.30, 0.30)]
+# CONFIGS         = ["nn", "ptas-obs", "ptas-cal-fb"]
+CONFIGS         = ["nn", "ptas-cal-fb"]
+ACC_PLOTS_CONFIGS = ["nn"]  # subset of CONFIGS to show in accuracy plots
+EPOCHS   = 20
 BATCH    = 64
-LR       = 0.05
+LR       = 0.01
 EPS_LOW  = 0.05
 N_HIDDEN = 32
 BASE_PORT = 6550   # incremented per PTAS run to avoid port collisions
 
 # Both configs run N_RUNS independent noise draws; results are averaged.
 N_RUNS = 5
+# N_RUNS = 1
+
 
 
 @dataclass
@@ -136,19 +165,23 @@ def _build_grid(base_port: int = BASE_PORT) -> list[ExpSpec]:
     for sigma in FEATURE_SIGMAS:
         xt_cal = feature_noise_to_trust(sigma)
         for run in range(N_RUNS):
-            # for config in CONFIGS:
+            specs.append(ExpSpec(
+                label=f"fn_{sigma:.2f}_nn_r{run}",
+                config="nn", sigma=sigma, flip=0.0,
+                use_ptas=False, x_trust="trusted", y_trust="trusted",
+                port=BASE_PORT, run_seed=run,
+            ))
             # specs.append(ExpSpec(
-            #     label=f"fn_{sigma:.2f}_nn_r{run}",
-            #     config="nn", sigma=sigma, flip=0.0,
-            #     use_ptas=False, x_trust="trusted", y_trust="trusted",
-            #     port=BASE_PORT, run_seed=run,
+            #     label=f"fn_{sigma:.2f}_ptas-obs_r{run}",
+            #     config="ptas-obs", sigma=sigma, flip=0.0,
+            #     use_ptas=True, x_trust=xt_cal, y_trust="trusted",
+            #     port=_next_port(), run_seed=run,
             # ))
             specs.append(ExpSpec(
                 label=f"fn_{sigma:.2f}_ptas-cal-fb_r{run}",
                 config="ptas-cal-fb", sigma=sigma, flip=0.0,
                 use_ptas=True, x_trust=xt_cal, y_trust="trusted",
-                port=_next_port(), run_seed=run, 
-                # trust_feedback=True,
+                port=_next_port(), run_seed=run,
             ))
 
     # ------------------------------------------------------------------
@@ -157,18 +190,23 @@ def _build_grid(base_port: int = BASE_PORT) -> list[ExpSpec]:
     for flip in LABEL_FLIPS:
         yt_cal = label_noise_to_trust(flip)
         for run in range(N_RUNS):
+            specs.append(ExpSpec(
+                label=f"ln_{flip:.2f}_nn_r{run}",
+                config="nn", sigma=0.0, flip=flip,
+                use_ptas=False, x_trust="trusted", y_trust="trusted",
+                port=BASE_PORT, run_seed=run,
+            ))
             # specs.append(ExpSpec(
-            #     label=f"ln_{flip:.2f}_nn_r{run}",
-            #     config="nn", sigma=0.0, flip=flip,
-            #     use_ptas=False, x_trust="trusted", y_trust="trusted",
-            #     port=BASE_PORT, run_seed=run,
+            #     label=f"ln_{flip:.2f}_ptas-obs_r{run}",
+            #     config="ptas-obs", sigma=0.0, flip=flip,
+            #     use_ptas=True, x_trust="trusted", y_trust=yt_cal,
+            #     port=_next_port(), run_seed=run,
             # ))
             specs.append(ExpSpec(
                 label=f"ln_{flip:.2f}_ptas-cal-fb_r{run}",
                 config="ptas-cal-fb", sigma=0.0, flip=flip,
                 use_ptas=True, x_trust="trusted", y_trust=yt_cal,
-                port=_next_port(), run_seed=run, 
-                # trust_feedback=True,
+                port=_next_port(), run_seed=run,
             ))
 
     # ------------------------------------------------------------------
@@ -178,18 +216,23 @@ def _build_grid(base_port: int = BASE_PORT) -> list[ExpSpec]:
         xt_cal = feature_noise_to_trust(sigma)
         yt_cal = label_noise_to_trust(flip)
         for run in range(N_RUNS):
+            specs.append(ExpSpec(
+                label=f"comb_{sigma:.2f}_{flip:.2f}_nn_r{run}",
+                config="nn", sigma=sigma, flip=flip,
+                use_ptas=False, x_trust="trusted", y_trust="trusted",
+                port=BASE_PORT, run_seed=run,
+            ))
             # specs.append(ExpSpec(
-            #     label=f"comb_{sigma:.2f}_{flip:.2f}_nn_r{run}",
-            #     config="nn", sigma=sigma, flip=flip,
-            #     use_ptas=False, x_trust="trusted", y_trust="trusted",
-            #     port=BASE_PORT, run_seed=run,
+            #     label=f"comb_{sigma:.2f}_{flip:.2f}_ptas-obs_r{run}",
+            #     config="ptas-obs", sigma=sigma, flip=flip,
+            #     use_ptas=True, x_trust=xt_cal, y_trust=yt_cal,
+            #     port=_next_port(), run_seed=run,
             # ))
             specs.append(ExpSpec(
                 label=f"comb_{sigma:.2f}_{flip:.2f}_ptas-cal-fb_r{run}",
                 config="ptas-cal-fb", sigma=sigma, flip=flip,
                 use_ptas=True, x_trust=xt_cal, y_trust=yt_cal,
-                port=_next_port(), run_seed=run, 
-                # trust_feedback=True,
+                port=_next_port(), run_seed=run,
             ))
 
     return specs
@@ -380,7 +423,7 @@ def plot_trust_mapping(output_dir: str):
 def _plot_noise_axis(all_results: dict, ax, prefix_fn, x_vals,
                      xlabel: str, xlim: tuple):
     """Fill ax with mean±std curves for nn and ptas-cal-fb along one noise axis."""
-    for cfg in CONFIGS:
+    for cfg in ACC_PLOTS_CONFIGS:
         ms = [_acc_multi(all_results, f"{prefix_fn(v)}_{cfg}") for v in x_vals]
         means = np.array([m for m, _ in ms])
         stds  = np.array([s for _, s in ms])
@@ -405,7 +448,7 @@ def plot_feature_noise(all_results: dict, output_dir: str):
                      prefix_fn=lambda s: f"fn_{s:.2f}",
                      x_vals=FEATURE_SIGMAS,
                      xlabel=r"Relative feature noise $\sigma_{rel}$",
-                     xlim=(-0.02, 0.55))
+                     xlim=(-0.02, 1.05))
     ax.set_title("NN: feature measurement noise")
     fig.tight_layout()
     path = os.path.join(output_dir, "plots", "feature_noise_accuracy.pdf")
@@ -425,7 +468,7 @@ def plot_label_noise(all_results: dict, output_dir: str):
                      prefix_fn=lambda p: f"ln_{p:.2f}",
                      x_vals=LABEL_FLIPS,
                      xlabel=r"Label flip rate $p$",
-                     xlim=(-0.01, 0.33))
+                     xlim=(-0.01, 1.05))
     ax.set_title("NN: label mislabelling")
     fig.tight_layout()
     path = os.path.join(output_dir, "plots", "label_noise_accuracy.pdf")
@@ -446,7 +489,7 @@ def plot_combined(all_results: dict, output_dir: str):
     offsets = [-width / 2, width / 2]
 
     fig, ax = plt.subplots(figsize=(7, 4))
-    for offset, cfg in zip(offsets, CONFIGS):
+    for offset, cfg in zip(offsets, ACC_PLOTS_CONFIGS):
         ms   = [_acc_multi(all_results, f"comb_{s:.2f}_{p:.2f}_{cfg}") for s, p in COMBINED]
         accs = [m for m, _ in ms]
         errs = [s for _, s in ms]
@@ -539,12 +582,14 @@ def plot_learning_curves(all_results: dict, output_dir: str):
         ("ln_0.15_", r"Label noise $p=0.15$"),
     ]
     fig, axes = plt.subplots(2, 2, figsize=(10, 7), sharey=False)
-    epochs_x = list(range(1, EPOCHS + 1))
 
     for ax, (prefix, title) in zip(axes.flat, selected):
-        for cfg in CONFIGS:
+        n_epochs_ax = 0
+        for cfg in ACC_PLOTS_CONFIGS:
             mean_c, std_c = _epoch_curve_multi(all_results, f"{prefix}{cfg}")
             if mean_c:
+                epochs_x = list(range(1, len(mean_c) + 1))
+                n_epochs_ax = max(n_epochs_ax, len(mean_c))
                 ax.plot(epochs_x, mean_c, color=_COLORS[cfg], lw=2, label=_LABELS[cfg])
                 lo = np.array(mean_c) - np.array(std_c)
                 hi = np.array(mean_c) + np.array(std_c)
@@ -553,7 +598,8 @@ def plot_learning_curves(all_results: dict, output_dir: str):
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Test accuracy (%)")
         ax.legend(fontsize=8)
-        ax.set_xlim(1, EPOCHS)
+        if n_epochs_ax > 0:
+            ax.set_xlim(1, n_epochs_ax)
 
     fig.suptitle("Learning curves: NN under noise", fontsize=13)
     fig.tight_layout()
@@ -748,14 +794,16 @@ def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str):
     gap means PaTAS assigns higher projected confidence to correct predictions
     even though it never saw the test labels.
 
-    Produces:
-      plots/ptas_effectiveness.pdf   — 2-panel line plot
-      tables/ptas_effectiveness.tex  — summary table
+    Produces (one file per opinion source):
+      plots/patas_effectiveness_agg.pdf  — aggregated (feedforward propagated)
+      plots/patas_effectiveness_out.pdf  — output-layer weights (ABF-averaged)
+      plots/patas_effectiveness_wt.pdf   — softmax-weighted blend
+      tables/patas_effectiveness.tex     — summary table (agg source)
     """
     import pickle
 
     try:
-        from patas_module.concrete.TensorTO import TensorArrayTO
+        from patas_module.concrete.TensorTO import TensorArrayTO, av_fuse_gen, normalize_tensor
     except ImportError:
         print("  [skip] TensorArrayTO not importable — skipping effectiveness analysis")
         return
@@ -766,29 +814,50 @@ def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str):
 
     y_test_int = ds.y_test
     n_test, dim = ds.X_test.shape
-    a_base = 1.0 / n_classes   # kept for reference; metric is now belief b only
+    idx_eff    = np.arange(n_test)
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    def _nn_predictions(nn_pkl_path: str) -> Optional[np.ndarray]:
+    def _load_nn(nn_pkl_path: str, X_eval=None):
+        """Return (nn_preds, a2) evaluated on X_eval (defaults to clean ds.X_test).
+
+        Both NN and PTAS receive the same X_eval; only PTAS gets the calibrated
+        trust opinion — the NN processes noisy input as-is (noise-unaware).
+        """
         if not os.path.exists(nn_pkl_path):
-            return None
+            return None, None
+        if X_eval is None:
+            X_eval = ds.X_test
         with open(nn_pkl_path, "rb") as fh:
             w = pickle.load(fh)
-        a1 = relu(ds.X_test @ w["W1"] + w["b1"])
+        a1 = relu(X_eval @ w["W1"] + w["b1"])
         a2 = softmax(a1 @ w["W2"] + w["b2"])
-        return a2.argmax(axis=1)
+        return a2.argmax(axis=1), a2
 
     def _mean_split(arr, mask, n_c, n_w):
         c = float(arr[mask].mean())  if n_c > 0 else float("nan")
         w = float(arr[~mask].mean()) if n_w > 0 else float("nan")
         return c, w
 
-    def _ptas_opinion(omega_pkl_path: str, trust_op,
-                      nn_preds: np.ndarray):
-        """Return (b, d, u) arrays in the NN's predicted class. Shape each: (n_test,)"""
+    def _store_comb(comb_recs, axis, key, b, d, u, nn_sc, correct, n_c, n_w):
+        """Compute and store all five combined scores for one condition."""
+        comb_recs["comb_bd"  ][axis][key] = _mean_split(nn_sc * ((b - d            + 1.0) / 2.0), correct, n_c, n_w)
+        comb_recs["comb_b"][axis][key] = _mean_split(nn_sc *   b,                               correct, n_c, n_w)
+        comb_recs["comb_bu"  ][axis][key] = _mean_split(nn_sc * ((b - u            + 1.0) / 2.0), correct, n_c, n_w)
+        comb_recs["comb_bdu"  ][axis][key] = _mean_split(nn_sc * ((b - d - u / 2.0 + 1.0) / 2.0), correct, n_c, n_w)
+        comb_recs["comb_pi"   ][axis][key] = _mean_split(nn_sc *  (b + u / 2.0),                   correct, n_c, n_w)
+
+    def _compute_all_opinions(omega_pkl_path: str, a2: np.ndarray,
+                               trust_or_tens, nn_preds: np.ndarray):
+        """Return dict {"agg": (b,d,u), "out": (b,d,u), "wt": (b,d,u)}.
+
+        trust_or_tens: either a TrustOpinion (uniform over all samples) or an
+        ndarray of shape (n_test, dim, 3) for per-sample trust opinions.
+        Per-sample trust is used for the mixed clean/noisy evaluation so that
+        PTAS is aware of which samples were perturbed.
+        """
         if not os.path.exists(omega_pkl_path):
             return None
         with open(omega_pkl_path, "rb") as fh:
@@ -804,43 +873,105 @@ def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str):
             use_tensor=True,
         )
 
-        bv, dv, uv = float(trust_op.t), float(trust_op.d), float(trust_op.u)
-        tens = np.empty((n_test, dim, 3), dtype=np.float32)
-        tens[..., 0] = bv
-        tens[..., 1] = dv
-        tens[..., 2] = uv
+        if isinstance(trust_or_tens, np.ndarray):
+            tens = trust_or_tens.astype(np.float32)
+        else:
+            bv, dv, uv = float(trust_or_tens.t), float(trust_or_tens.d), float(trust_or_tens.u)
+            tens = np.empty((n_test, dim, 3), dtype=np.float32)
+            tens[..., 0] = bv; tens[..., 1] = dv; tens[..., 2] = uv
         Ty2 = ptas.apply_feedforward(TensorArrayTO(tens), tmp=False)  # (n_test, n_classes, 3)
 
         idx = np.arange(n_test)
-        return (Ty2.value[idx, nn_preds, 0],   # b
-                Ty2.value[idx, nn_preds, 1],   # d
-                Ty2.value[idx, nn_preds, 2])   # u
+
+        # agg: feedforward propagated, predicted class
+        agg = (Ty2.value[idx, nn_preds, 0],
+               Ty2.value[idx, nn_preds, 1],
+               Ty2.value[idx, nn_preds, 2])
+
+        # out: ABF-averaged last-layer weights, indexed by predicted class
+        # omega_data[-1] shape: (output, ...) — fuse across axis=0 -> (output, 3)
+        out_fused = av_fuse_gen(omega_data[-1].astype(np.float32), axis=0)  # (output, 3)
+        out = (out_fused[nn_preds, 0],
+               out_fused[nn_preds, 1],
+               out_fused[nn_preds, 2])
+
+        # wt: softmax-weighted blend of all output-class opinions
+        # Ty2.value shape: (n_test, n_classes, 3); a2 shape: (n_test, n_classes)
+        wt_raw = np.einsum('ij,ijk->ik', a2, Ty2.value)  # (n_test, 3)
+        wt_norm = normalize_tensor(wt_raw)
+        wt = (wt_norm[:, 0], wt_norm[:, 1], wt_norm[:, 2])
+
+        return {"agg": agg, "out": out, "wt": wt}
 
     # ------------------------------------------------------------------
     # Collect metrics — feature noise axis
     # ------------------------------------------------------------------
 
-    fn_records: dict[float, tuple] = {}   # sigma -> (b_c, b_w, d_c, d_w, u_c, u_w)
+    # records[src][axis][key] = (b_c, b_w, d_c, d_w, u_c, u_w)
+    records = {
+        "agg": {"fn": {}, "ln": {}, "cb": {}},
+        "out": {"fn": {}, "ln": {}, "cb": {}},
+        "wt":  {"fn": {}, "ln": {}, "cb": {}},
+    }
+    # comb_records[signal][axis][key] = (mean_correct, mean_wrong)
+    comb_records = {k: {"fn": {}, "ln": {}, "cb": {}}
+                    for k in ("comb_bd", "comb_b",
+                               "comb_bu", "comb_bdu", "comb_pi")}
     fn_tex_rows: list[list] = []
 
+    from noise_utils import add_feature_noise as _afn
+
+    # ------------------------------------------------------------------
+    # Build mixed test set once — reused for every trained model.
+    # 50 % of samples are perturbed; their sigma is drawn Uniform(0, 1).
+    # PTAS receives the matching per-sample calibrated trust opinion.
+    # NN receives the noisy X as-is (noise-unaware baseline).
+    # ------------------------------------------------------------------
+    # All test samples receive noise with σᵢ ~ Uniform(0, 1).
+    # PTAS gets per-sample calibrated trust; NN processes noisy X as-is.
+    # ------------------------------------------------------------------
+    _sigmas   = np.random.default_rng(1).uniform(0.0, 1.0, n_test)
+
+    X_std     = float(ds.X_test.std())
+    _noise_raw = np.random.default_rng(2).normal(0, 1, ds.X_test.shape).astype(np.float32)
+    _X_mix    = (ds.X_test + _noise_raw * (_sigmas[:, None] * X_std)).astype(np.float32)
+
+    # Per-sample trust tensor: look up feature_noise_to_trust on a fine grid.
+    _sg  = np.linspace(0, 1, 1001)
+    _bg  = np.array([feature_noise_to_trust(float(s)).t for s in _sg], dtype=np.float32)
+    _dg  = np.array([feature_noise_to_trust(float(s)).d for s in _sg], dtype=np.float32)
+    _ug  = np.array([feature_noise_to_trust(float(s)).u for s in _sg], dtype=np.float32)
+
+    _s_idx    = (_sigmas * 1000).astype(int).clip(0, 1000)
+    _tens_per = np.empty((n_test, dim, 3), dtype=np.float32)
+    _tens_per[:, :, 0] = _bg[_s_idx][:, None]
+    _tens_per[:, :, 1] = _dg[_s_idx][:, None]
+    _tens_per[:, :, 2] = _ug[_s_idx][:, None]
+
     for sigma in FEATURE_SIGMAS:
-        base     = os.path.join(output_dir, "data")
-        omega_p  = os.path.join(base, f"fn_{sigma:.2f}_ptas-cal-fb_r0", "omega_thetas.pkl")
-        nn_p     = os.path.join(base, f"fn_{sigma:.2f}_ptas-cal-fb_r0", "nn_weights.pkl")
-        nn_preds = _nn_predictions(nn_p)
+        base    = os.path.join(output_dir, "data")
+        omega_p = os.path.join(base, f"fn_{sigma:.2f}_ptas-cal-fb_r0", "omega_thetas.pkl")
+        nn_p    = os.path.join(base, f"fn_{sigma:.2f}_ptas-cal-fb_r0", "nn_weights.pkl")
+        nn_preds, a2 = _load_nn(nn_p, X_eval=_X_mix)
         if nn_preds is None:
             continue
         correct   = (nn_preds == y_test_int)
         n_correct = int(correct.sum())
         n_wrong   = int((~correct).sum())
-        opinion = _ptas_opinion(omega_p, feature_noise_to_trust(sigma), nn_preds)
-        if opinion is None:
+        opinions = _compute_all_opinions(omega_p, a2, _tens_per, nn_preds)
+        if opinions is None:
             continue
-        b_arr, d_arr, u_arr = opinion
-        b_c, b_w = _mean_split(b_arr, correct, n_correct, n_wrong)
-        d_c, d_w = _mean_split(d_arr, correct, n_correct, n_wrong)
-        u_c, u_w = _mean_split(u_arr, correct, n_correct, n_wrong)
-        fn_records[sigma] = (b_c, b_w, d_c, d_w, u_c, u_w)
+        for src in ("agg", "out", "wt"):
+            b_arr, d_arr, u_arr = opinions[src]
+            b_c, b_w = _mean_split(b_arr, correct, n_correct, n_wrong)
+            d_c, d_w = _mean_split(d_arr, correct, n_correct, n_wrong)
+            u_c, u_w = _mean_split(u_arr, correct, n_correct, n_wrong)
+            records[src]["fn"][sigma] = (b_c, b_w, d_c, d_w, u_c, u_w)
+        b_agg, d_agg, u_agg = opinions["agg"]
+        nn_sc = a2[idx_eff, nn_preds]
+        _store_comb(comb_records, "fn", sigma, b_agg, d_agg, u_agg, nn_sc, correct, n_correct, n_wrong)
+        # tex rows from agg only
+        b_c, b_w, d_c, d_w, u_c, u_w = records["agg"]["fn"][sigma]
         b_gap = f"{b_c - b_w:+.4f}" if not (np.isnan(b_c) or np.isnan(b_w)) else "—"
         d_gap = f"{d_c - d_w:+.4f}" if not (np.isnan(d_c) or np.isnan(d_w)) else "—"
         u_gap = f"{u_c - u_w:+.4f}" if not (np.isnan(u_c) or np.isnan(u_w)) else "—"
@@ -856,27 +987,33 @@ def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str):
     # ------------------------------------------------------------------
 
     trusted_op = TrustOpinion(1.0, 0.0, 0.0)
-    ln_records: dict[float, tuple] = {}   # flip -> (b_c, b_w, d_c, d_w, u_c, u_w)
     ln_tex_rows: list[list] = []
 
     for flip in LABEL_FLIPS:
-        base     = os.path.join(output_dir, "data")
-        omega_p  = os.path.join(base, f"ln_{flip:.2f}_ptas-cal-fb_r0", "omega_thetas.pkl")
-        nn_p     = os.path.join(base, f"ln_{flip:.2f}_ptas-cal-fb_r0", "nn_weights.pkl")
-        nn_preds = _nn_predictions(nn_p)
+        base    = os.path.join(output_dir, "data")
+        omega_p = os.path.join(base, f"ln_{flip:.2f}_ptas-cal-fb_r0", "omega_thetas.pkl")
+        nn_p    = os.path.join(base, f"ln_{flip:.2f}_ptas-cal-fb_r0", "nn_weights.pkl")
+        # Label-noise runs: features are clean; PTAS uses fully trusted opinion.
+        nn_preds, a2 = _load_nn(nn_p)   # clean X_test
         if nn_preds is None:
             continue
         correct   = (nn_preds == y_test_int)
         n_correct = int(correct.sum())
         n_wrong   = int((~correct).sum())
-        opinion = _ptas_opinion(omega_p, trusted_op, nn_preds)
-        if opinion is None:
+        opinions = _compute_all_opinions(omega_p, a2, trusted_op, nn_preds)
+        if opinions is None:
             continue
-        b_arr, d_arr, u_arr = opinion
-        b_c, b_w = _mean_split(b_arr, correct, n_correct, n_wrong)
-        d_c, d_w = _mean_split(d_arr, correct, n_correct, n_wrong)
-        u_c, u_w = _mean_split(u_arr, correct, n_correct, n_wrong)
-        ln_records[flip] = (b_c, b_w, d_c, d_w, u_c, u_w)
+        for src in ("agg", "out", "wt"):
+            b_arr, d_arr, u_arr = opinions[src]
+            b_c, b_w = _mean_split(b_arr, correct, n_correct, n_wrong)
+            d_c, d_w = _mean_split(d_arr, correct, n_correct, n_wrong)
+            u_c, u_w = _mean_split(u_arr, correct, n_correct, n_wrong)
+            records[src]["ln"][flip] = (b_c, b_w, d_c, d_w, u_c, u_w)
+        b_agg, d_agg, u_agg = opinions["agg"]
+        nn_sc = a2[idx_eff, nn_preds]
+        _store_comb(comb_records, "ln", flip, b_agg, d_agg, u_agg, nn_sc, correct, n_correct, n_wrong)
+        # tex rows from agg only
+        b_c, b_w, d_c, d_w, u_c, u_w = records["agg"]["ln"][flip]
         b_gap = f"{b_c - b_w:+.4f}" if not (np.isnan(b_c) or np.isnan(b_w)) else "—"
         d_gap = f"{d_c - d_w:+.4f}" if not (np.isnan(d_c) or np.isnan(d_w)) else "—"
         u_gap = f"{u_c - u_w:+.4f}" if not (np.isnan(u_c) or np.isnan(u_w)) else "—"
@@ -891,29 +1028,35 @@ def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str):
     # Collect metrics — combined noise axis (calibrated feature trust)
     # ------------------------------------------------------------------
 
-    cb_records: dict[tuple, tuple] = {}   # (sigma,flip) -> (b_c,b_w,d_c,d_w,u_c,u_w)
     cb_tex_rows: list[list] = []
 
     for sigma, flip in COMBINED:
-        base     = os.path.join(output_dir, "data")
-        omega_p  = os.path.join(base, f"comb_{sigma:.2f}_{flip:.2f}_ptas-cal-fb_r0",
-                                "omega_thetas.pkl")
-        nn_p     = os.path.join(base, f"comb_{sigma:.2f}_{flip:.2f}_ptas-cal-fb_r0",
-                                "nn_weights.pkl")
-        nn_preds = _nn_predictions(nn_p)
+        base    = os.path.join(output_dir, "data")
+        omega_p = os.path.join(base, f"comb_{sigma:.2f}_{flip:.2f}_ptas-cal-fb_r0",
+                               "omega_thetas.pkl")
+        nn_p    = os.path.join(base, f"comb_{sigma:.2f}_{flip:.2f}_ptas-cal-fb_r0",
+                               "nn_weights.pkl")
+        # Combined: same random-sigma mixed X and per-sample trust as feature-noise axis.
+        nn_preds, a2 = _load_nn(nn_p, X_eval=_X_mix)
         if nn_preds is None:
             continue
         correct   = (nn_preds == y_test_int)
         n_correct = int(correct.sum())
         n_wrong   = int((~correct).sum())
-        opinion = _ptas_opinion(omega_p, feature_noise_to_trust(sigma), nn_preds)
-        if opinion is None:
+        opinions = _compute_all_opinions(omega_p, a2, _tens_per, nn_preds)
+        if opinions is None:
             continue
-        b_arr, d_arr, u_arr = opinion
-        b_c, b_w = _mean_split(b_arr, correct, n_correct, n_wrong)
-        d_c, d_w = _mean_split(d_arr, correct, n_correct, n_wrong)
-        u_c, u_w = _mean_split(u_arr, correct, n_correct, n_wrong)
-        cb_records[(sigma, flip)] = (b_c, b_w, d_c, d_w, u_c, u_w)
+        for src in ("agg", "out", "wt"):
+            b_arr, d_arr, u_arr = opinions[src]
+            b_c, b_w = _mean_split(b_arr, correct, n_correct, n_wrong)
+            d_c, d_w = _mean_split(d_arr, correct, n_correct, n_wrong)
+            u_c, u_w = _mean_split(u_arr, correct, n_correct, n_wrong)
+            records[src]["cb"][(sigma, flip)] = (b_c, b_w, d_c, d_w, u_c, u_w)
+        b_agg, d_agg, u_agg = opinions["agg"]
+        nn_sc = a2[idx_eff, nn_preds]
+        _store_comb(comb_records, "cb", (sigma, flip), b_agg, d_agg, u_agg, nn_sc, correct, n_correct, n_wrong)
+        # tex rows from agg only
+        b_c, b_w, d_c, d_w, u_c, u_w = records["agg"]["cb"][(sigma, flip)]
         b_gap = f"{b_c - b_w:+.4f}" if not (np.isnan(b_c) or np.isnan(b_w)) else "—"
         d_gap = f"{d_c - d_w:+.4f}" if not (np.isnan(d_c) or np.isnan(d_w)) else "—"
         u_gap = f"{u_c - u_w:+.4f}" if not (np.isnan(u_c) or np.isnan(u_w)) else "—"
@@ -924,126 +1067,249 @@ def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str):
             f"{u_c:.4f}", f"{u_w:.4f}", u_gap,
         ])
 
-    if not fn_records and not ln_records and not cb_records:
+    # Check if any data was collected across all sources
+    has_data = any(
+        records[src][axis]
+        for src in ("agg", "out", "wt")
+        for axis in ("fn", "ln", "cb")
+    )
+    if not has_data:
         print("  [skip] No ptas-cal-fb runs found — skipping effectiveness analysis")
         return
 
     # ------------------------------------------------------------------
-    # Plot: 3-column grid (feature / label / combined noise)
+    # Plot: one 2×3 grid per opinion source
     # ------------------------------------------------------------------
 
     _C = {"b": "#2b7bba", "d": "#c0392b", "u": "#e07b39"}
 
-    fig, axes = plt.subplots(2, 3, figsize=(15, 7),
-                             gridspec_kw={"height_ratios": [2, 1]})
+    src_meta = {
+        "agg": ("Aggregated (feedforward propagated)", "patas_effectiveness_agg"),
+        "out": ("Output-layer weights (ABF)",           "patas_effectiveness_out"),
+        "wt":  ("Softmax-weighted blend",              "patas_effectiveness_wt"),
+    }
 
-    # Panel specs: (ax_top, ax_bot, records, x_vals, tick_labels, xlabel, title)
     cb_x     = list(range(len(COMBINED)))
     cb_ticks = [f"$\\sigma$={s:.2f}\n$p$={p:.2f}" for s, p in COMBINED]
-    panels = [
-        (axes[0, 0], axes[1, 0],
-         {v: fn_records[v] for v in sorted(FEATURE_SIGMAS) if v in fn_records},
-         sorted(FEATURE_SIGMAS), None,
-         r"Feature noise $\sigma_{rel}$",
-         r"Feature noise ($\sigma_{rel}$-calibrated $T_x$)"),
-        (axes[0, 1], axes[1, 1],
-         {v: ln_records[v] for v in sorted(LABEL_FLIPS) if v in ln_records},
-         sorted(LABEL_FLIPS), None,
-         r"Label flip rate $p$",
-         r"Label noise (trusted $T_x$)"),
-        (axes[0, 2], axes[1, 2],
-         {i: cb_records[k] for i, k in enumerate(COMBINED) if k in cb_records},
-         cb_x, cb_ticks,
-         "Condition",
-         "Combined noise ($T_x$ calibrated)"),
+
+    for src, (src_title, src_fname) in src_meta.items():
+        fn_recs = records[src]["fn"]
+        ln_recs = records[src]["ln"]
+        cb_recs = records[src]["cb"]
+        if not fn_recs and not ln_recs and not cb_recs:
+            continue
+
+        fig, axes = plt.subplots(2, 3, figsize=(15, 7),
+                                 gridspec_kw={"height_ratios": [2, 1]})
+
+        # Panel specs: (ax_top, ax_bot, recs, x_vals, tick_labels, xlabel, title)
+        panels = [
+            (axes[0, 0], axes[1, 0],
+             {v: fn_recs[v] for v in sorted(FEATURE_SIGMAS) if v in fn_recs},
+             sorted(FEATURE_SIGMAS), None,
+             r"Feature noise $\sigma_{rel}$",
+             r"Feature noise ($\sigma_{rel}$-calibrated $T_x$)"),
+            (axes[0, 1], axes[1, 1],
+             {v: ln_recs[v] for v in sorted(LABEL_FLIPS) if v in ln_recs},
+             sorted(LABEL_FLIPS), None,
+             r"Label flip rate $p$",
+             r"Label noise (trusted $T_x$)"),
+            (axes[0, 2], axes[1, 2],
+             {i: cb_recs[k] for i, k in enumerate(COMBINED) if k in cb_recs},
+             cb_x, cb_ticks,
+             "Condition",
+             "Combined noise ($T_x$ calibrated)"),
+        ]
+
+        nan6 = (float("nan"),) * 6
+        first_col = True
+        for ax_top, ax_bot, recs, x_vals, tick_labels, xlabel, title in panels:
+            b_c = [recs.get(v, nan6)[0] for v in x_vals]
+            b_w = [recs.get(v, nan6)[1] for v in x_vals]
+            d_c = [recs.get(v, nan6)[2] for v in x_vals]
+            d_w = [recs.get(v, nan6)[3] for v in x_vals]
+            u_c = [recs.get(v, nan6)[4] for v in x_vals]
+            u_w = [recs.get(v, nan6)[5] for v in x_vals]
+
+            for vals, color, ls, mk, lbl in [
+                (b_c, _C["b"], "-",  "o", "Belief (correct)"),
+                (b_w, _C["b"], "--", "s", "Belief (wrong)"),
+                (d_c, _C["d"], "-",  "o", "Disbelief (correct)"),
+                (d_w, _C["d"], "--", "s", "Disbelief (wrong)"),
+                (u_c, _C["u"], "-",  "o", "Uncertainty (correct)"),
+                (u_w, _C["u"], "--", "s", "Uncertainty (wrong)"),
+            ]:
+                ax_top.plot(x_vals, vals, color=color, linestyle=ls, marker=mk,
+                            lw=2, ms=6, label=lbl)
+
+            if first_col:
+                ax_top.set_ylabel("Mean opinion mass in NN's predicted class")
+            ax_top.set_title(title, fontsize=10)
+            ax_top.legend(fontsize=6, ncol=2)
+            all_vals = [v for lst in [b_c, b_w, d_c, d_w, u_c, u_w]
+                        for v in lst if not np.isnan(v)]
+            if all_vals:
+                ylo, yhi = min(all_vals), max(all_vals)
+                margin = max(0.03, (yhi - ylo) * 0.3)
+                ax_top.set_ylim(max(0.0, ylo - margin), min(1.0, yhi + margin))
+
+            xs = np.array(x_vals, dtype=float)
+            bw_bar = min(np.diff(xs).min() if len(xs) > 1 else 1.0,
+                         0.04 if tick_labels is None else 0.25) * 0.9
+            xlim   = (xs[0] - 2.5 * bw_bar, xs[-1] + 2.5 * bw_bar)
+            ax_top.set_xlim(*xlim)
+            if tick_labels is not None:
+                ax_top.set_xticks(x_vals)
+                ax_top.set_xticklabels(tick_labels, fontsize=7)
+
+            gaps_b = [bc - bw if not (np.isnan(bc) or np.isnan(bw)) else 0.0
+                      for bc, bw in zip(b_c, b_w)]
+            gaps_d = [dc - dw if not (np.isnan(dc) or np.isnan(dw)) else 0.0
+                      for dc, dw in zip(d_c, d_w)]
+            gaps_u = [uc - uw if not (np.isnan(uc) or np.isnan(uw)) else 0.0
+                      for uc, uw in zip(u_c, u_w)]
+
+            for off, gaps, color, lbl in zip(
+                [-bw_bar, 0.0, bw_bar],
+                [gaps_b, gaps_d, gaps_u],
+                [_C["b"], _C["d"], _C["u"]],
+                ["b", "d", "u"],
+            ):
+                bars = ax_bot.bar(xs + off, gaps, width=bw_bar, color=color,
+                                  label=lbl, zorder=3)
+                for bar, g in zip(bars, gaps):
+                    if g == 0.0:
+                        continue
+                    va  = "bottom" if g >= 0 else "top"
+                    pad = 0.0005 if g >= 0 else -0.0005
+                    ax_bot.text(bar.get_x() + bar.get_width() / 2, g + pad,
+                                f"{g:+.3f}", ha="center", va=va, fontsize=6,
+                                color=color)
+            ax_bot.axhline(0, color="black", lw=0.8)
+            ax_bot.set_xlabel(xlabel)
+            if first_col:
+                ax_bot.set_ylabel(r"$\Delta$ (correct $-$ wrong)")
+            ax_bot.set_xlim(*xlim)
+            ax_bot.legend(fontsize=6, ncol=3)
+            ax_bot.grid(axis="y", linestyle=":", alpha=0.5, zorder=0)
+            if tick_labels is not None:
+                ax_bot.set_xticks(x_vals)
+                ax_bot.set_xticklabels(tick_labels, fontsize=7)
+            first_col = False
+
+        fig.suptitle(f"PaTAS confidence signal — {src_title}: opinion masses in predicted class",
+                     fontsize=11)
+        try:
+            fig.tight_layout()
+        except Exception as e:
+            print(f"Error occurred while adjusting layout: {e}")
+        path = os.path.join(output_dir, "plots", f"{src_fname}.pdf")
+        fig.savefig(path, bbox_inches="tight")
+        fig.savefig(path.replace(".pdf", ".png"), dpi=150)
+        plt.close(fig)
+        print(f"  Saved {path}")
+
+    # ------------------------------------------------------------------
+    # Combined-signal effectiveness plots: comb_bd and comb_b
+    # Each shows mean combined score for correct vs. wrong predictions.
+    # ------------------------------------------------------------------
+    _comb_meta = [
+        ("comb_bd",   r"$(b{-}d)$",                    "#e07b39", "patas_effectiveness_comb_bd"),
+        ("comb_b", r"$b$",                           "#8e44ad", "patas_effectiveness_comb_b"),
+        ("comb_bu",   r"$(b{-}u)$",                    "#1abc9c", "patas_effectiveness_comb_bu"),
+        ("comb_bdu",   r"$(b{-}d{-}\frac{u}{2})$",      "#e74c3c", "patas_effectiveness_comb_bdu"),
+        ("comb_pi",    r"$\pi$  $(b+\frac{u}{2})$",     "#2980b9", "patas_effectiveness_comb_pi"),
     ]
+    cb_x     = list(range(len(COMBINED)))
+    cb_ticks = [f"$\\sigma$={s:.2f}\n$p$={p:.2f}" for s, p in COMBINED]
+    nan2     = (float("nan"),) * 2
 
-    nan6 = (float("nan"),) * 6
-    first_col = True
-    for ax_top, ax_bot, records, x_vals, tick_labels, xlabel, title in panels:
-        b_c = [records.get(v, nan6)[0] for v in x_vals]
-        b_w = [records.get(v, nan6)[1] for v in x_vals]
-        d_c = [records.get(v, nan6)[2] for v in x_vals]
-        d_w = [records.get(v, nan6)[3] for v in x_vals]
-        u_c = [records.get(v, nan6)[4] for v in x_vals]
-        u_w = [records.get(v, nan6)[5] for v in x_vals]
+    for comb_key, comb_title, comb_color, comb_fname in _comb_meta:
+        fn_r = comb_records[comb_key]["fn"]
+        ln_r = comb_records[comb_key]["ln"]
+        cb_r = comb_records[comb_key]["cb"]
+        if not fn_r and not ln_r and not cb_r:
+            continue
 
-        for vals, color, ls, mk, lbl in [
-            (b_c, _C["b"], "-",  "o", "Belief (correct)"),
-            (b_w, _C["b"], "--", "s", "Belief (wrong)"),
-            (d_c, _C["d"], "-",  "o", "Disbelief (correct)"),
-            (d_w, _C["d"], "--", "s", "Disbelief (wrong)"),
-            (u_c, _C["u"], "-",  "o", "Uncertainty (correct)"),
-            (u_w, _C["u"], "--", "s", "Uncertainty (wrong)"),
-        ]:
-            ax_top.plot(x_vals, vals, color=color, linestyle=ls, marker=mk,
-                        lw=2, ms=6, label=lbl)
+        fig, axes = plt.subplots(2, 3, figsize=(15, 7),
+                                 gridspec_kw={"height_ratios": [2, 1]})
+        panels = [
+            (axes[0, 0], axes[1, 0],
+             {v: fn_r.get(v, nan2) for v in sorted(FEATURE_SIGMAS)},
+             sorted(FEATURE_SIGMAS), None,
+             r"Feature noise $\sigma_{rel}$", "Feature noise"),
+            (axes[0, 1], axes[1, 1],
+             {v: ln_r.get(v, nan2) for v in sorted(LABEL_FLIPS)},
+             sorted(LABEL_FLIPS), None,
+             r"Label flip rate $p$", "Label noise"),
+            (axes[0, 2], axes[1, 2],
+             {i: cb_r.get(k, nan2) for i, k in enumerate(COMBINED)},
+             cb_x, cb_ticks, "Condition", "Combined noise"),
+        ]
 
-        if first_col:
-            ax_top.set_ylabel("Mean opinion mass in NN's predicted class")
-        ax_top.set_title(title, fontsize=10)
-        ax_top.legend(fontsize=6, ncol=2)
-        all_vals = [v for lst in [b_c, b_w, d_c, d_w, u_c, u_w]
-                    for v in lst if not np.isnan(v)]
-        if all_vals:
-            ylo, yhi = min(all_vals), max(all_vals)
-            margin = max(0.03, (yhi - ylo) * 0.3)
-            ax_top.set_ylim(max(0.0, ylo - margin), min(1.0, yhi + margin))
+        first_col = True
+        for ax_top, ax_bot, panel_r, x_vals, tick_labels, xlabel, title in panels:
+            m_c = [panel_r.get(v, nan2)[0] for v in x_vals]
+            m_w = [panel_r.get(v, nan2)[1] for v in x_vals]
 
-        xs = np.array(x_vals, dtype=float)
-        bw_bar = min(np.diff(xs).min() if len(xs) > 1 else 1.0, 0.04 if tick_labels is None else 0.25) * 0.9
-        xlim   = (xs[0] - 2.5 * bw_bar, xs[-1] + 2.5 * bw_bar)
-        ax_top.set_xlim(*xlim)
-        if tick_labels is not None:
-            ax_top.set_xticks(x_vals)
-            ax_top.set_xticklabels(tick_labels, fontsize=7)
+            ax_top.plot(x_vals, m_c, color=comb_color, lw=2, marker="o",
+                        linestyle="-",  label="Correct predictions")
+            ax_top.plot(x_vals, m_w, color=comb_color, lw=2, marker="s",
+                        linestyle="--", label="Wrong predictions")
 
-        gaps_b = [bc - bw if not (np.isnan(bc) or np.isnan(bw)) else 0.0
-                  for bc, bw in zip(b_c, b_w)]
-        gaps_d = [dc - dw if not (np.isnan(dc) or np.isnan(dw)) else 0.0
-                  for dc, dw in zip(d_c, d_w)]
-        gaps_u = [uc - uw if not (np.isnan(uc) or np.isnan(uw)) else 0.0
-                  for uc, uw in zip(u_c, u_w)]
+            if first_col:
+                ax_top.set_ylabel(f"Mean {comb_title}")
+            ax_top.set_title(title, fontsize=10)
+            ax_top.legend(fontsize=7)
+            all_v = [v for v in m_c + m_w if not np.isnan(v)]
+            if all_v:
+                ylo, yhi = min(all_v), max(all_v)
+                margin = max(0.01, (yhi - ylo) * 0.3)
+                ax_top.set_ylim(max(0.0, ylo - margin), min(1.0, yhi + margin))
 
-        for off, gaps, color, lbl in zip(
-            [-bw_bar, 0.0, bw_bar],
-            [gaps_b, gaps_d, gaps_u],
-            [_C["b"], _C["d"], _C["u"]],
-            ["b", "d", "u"],
-        ):
-            bars = ax_bot.bar(xs + off, gaps, width=bw_bar, color=color,
-                              label=lbl, zorder=3)
+            xs     = np.array(x_vals, dtype=float)
+            bw_bar = min(np.diff(xs).min() if len(xs) > 1 else 1.0,
+                         0.04 if tick_labels is None else 0.25) * 0.9
+            xlim   = (xs[0] - 2.5 * bw_bar, xs[-1] + 2.5 * bw_bar)
+            ax_top.set_xlim(*xlim)
+            if tick_labels is not None:
+                ax_top.set_xticks(x_vals)
+                ax_top.set_xticklabels(tick_labels, fontsize=7)
+
+            gaps = [c - w if not (np.isnan(c) or np.isnan(w)) else 0.0
+                    for c, w in zip(m_c, m_w)]
+            bars = ax_bot.bar(xs, gaps, width=bw_bar, color=comb_color, zorder=3)
             for bar, g in zip(bars, gaps):
                 if g == 0.0:
                     continue
                 va  = "bottom" if g >= 0 else "top"
                 pad = 0.0005 if g >= 0 else -0.0005
                 ax_bot.text(bar.get_x() + bar.get_width() / 2, g + pad,
-                            f"{g:+.3f}", ha="center", va=va, fontsize=6,
-                            color=color)
-        ax_bot.axhline(0, color="black", lw=0.8)
-        ax_bot.set_xlabel(xlabel)
-        if first_col:
-            ax_bot.set_ylabel(r"$\Delta$ (correct $-$ wrong)")
-        ax_bot.set_xlim(*xlim)
-        ax_bot.legend(fontsize=6, ncol=3)
-        ax_bot.grid(axis="y", linestyle=":", alpha=0.5, zorder=0)
-        if tick_labels is not None:
-            ax_bot.set_xticks(x_vals)
-            ax_bot.set_xticklabels(tick_labels, fontsize=7)
-        first_col = False
+                            f"{g:+.3f}", ha="center", va=va,
+                            fontsize=7, color=comb_color)
+            ax_bot.axhline(0, color="black", lw=0.8)
+            ax_bot.set_xlabel(xlabel)
+            if first_col:
+                ax_bot.set_ylabel(r"$\Delta$ (correct $-$ wrong)")
+            ax_bot.set_xlim(*xlim)
+            ax_bot.grid(axis="y", linestyle=":", alpha=0.5, zorder=0)
+            if tick_labels is not None:
+                ax_bot.set_xticks(x_vals)
+                ax_bot.set_xticklabels(tick_labels, fontsize=7)
+            first_col = False
 
-    fig.suptitle("PaTAS as NN confidence signal: opinion masses in predicted class",
-                 fontsize=12)
-    fig.tight_layout()
-    path = os.path.join(output_dir, "plots", "patas_effectiveness.pdf")
-    fig.savefig(path, bbox_inches="tight")
-    fig.savefig(path.replace(".pdf", ".png"), bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Saved {path}")
+        fig.suptitle(
+            f"PaTAS signal: correct vs. wrong predictions",
+            fontsize=11)
+        fig.tight_layout()
+        path = os.path.join(output_dir, "plots", f"{comb_fname}.pdf")
+        fig.savefig(path, bbox_inches="tight")
+        fig.savefig(path.replace(".pdf", ".png"), dpi=150)
+        plt.close(fig)
+        print(f"  Saved {path}")
 
     # ------------------------------------------------------------------
-    # Table
+    # Table (agg source only)
     # ------------------------------------------------------------------
 
     col_header = [
@@ -1079,12 +1345,457 @@ def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str):
             r"$\Delta = \text{correct} - \text{wrong}$; "
             r"positive $\Delta b$ and negative $\Delta d$/$\Delta u$ indicate discriminability."
         ),
-        label="tab:ptas-effectiveness",
+        label="tab:patas-effectiveness",
     )
-    tpath = os.path.join(output_dir, "tables", "ptas_effectiveness.tex")
+    tpath = os.path.join(output_dir, "tables", "patas_effectiveness.tex")
     with open(tpath, "w") as fh:
         fh.write(tex)
     print(f"  Saved {tpath}")
+
+
+def bdu_with_weights(b, d, u, nn_score):
+    b_w = nn_score * b
+    d_w = (1 - nn_score) * d
+    u_w =  nn_score * (1 - nn_score) * u
+    b_f = (b_w / (b_w + d_w + u_w)) 
+    d_f = d_w / (b_w + d_w + u_w)
+    u_f = 1-(b_f + d_f)
+    return b_f, d_f, u_f
+# ---------------------------------------------------------------------------
+# Coverage vs. accuracy curves
+# ---------------------------------------------------------------------------
+
+def plot_coverage_accuracy(ds, n_classes: int, output_dir: str):
+    """Coverage vs. accuracy curves sweeping confidence thresholds.
+
+    For PaTAS sources (agg, out, wt): threshold on projected probability π = b + u/K.
+    For NN baseline: threshold on softmax score.
+
+    Produces one plot per noise axis:
+      plots/coverage_accuracy_feature.pdf
+      plots/coverage_accuracy_label.pdf
+      plots/coverage_accuracy_combined.pdf
+    """
+    import pickle
+
+    try:
+        from patas_module.concrete.TensorTO import TensorArrayTO
+        from patas_module.NN.PTAStemplate import PTAS as PTASClass
+        from patas_module.concrete.TrustOpinion import TrustOpinion
+        from patas_module.NN.primaryNN import relu, softmax
+    except ImportError:
+        print("  [skip] skipping coverage-accuracy plot")
+        return
+
+    y_test  = ds.y_test
+    n_test, dim = ds.X_test.shape
+    idx     = np.arange(n_test)
+
+    # Both combined signals ∈ [0, 1] → sweep standard range.
+    taus_nn = np.linspace(0.0, 1.0, 300)
+
+    # ------------------------------------------------------------------
+    # Pre-build one shared noisy test set (all samples, σᵢ ~ U(0,1)).
+    # Both NN and PTAS receive this same X; PTAS gets per-sample calibrated
+    # trust; NN processes noisy X as-is (noise-unaware baseline).
+    # ------------------------------------------------------------------
+    from noise_utils import add_feature_noise as _afn_cv
+    _sigmas_cv   = np.random.default_rng(1).uniform(0.0, 1.0, n_test)
+    _noise_cv    = np.random.default_rng(2).normal(0, 1, ds.X_test.shape).astype(np.float32)
+    _X_noisy_cv  = (ds.X_test
+                    + _noise_cv * (_sigmas_cv[:, None] * float(ds.X_test.std()))
+                    ).astype(np.float32)
+
+    _sg_cv  = np.linspace(0.0, 1.0, 1001)
+    _bg_cv  = np.array([feature_noise_to_trust(float(s)).t for s in _sg_cv], dtype=np.float32)
+    _dg_cv  = np.array([feature_noise_to_trust(float(s)).d for s in _sg_cv], dtype=np.float32)
+    _ug_cv  = np.array([feature_noise_to_trust(float(s)).u for s in _sg_cv], dtype=np.float32)
+    _si_cv  = (_sigmas_cv * 1000).astype(int).clip(0, 1000)
+    _tens_cv = np.empty((n_test, dim, 3), dtype=np.float32)
+    _tens_cv[:, :, 0] = _bg_cv[_si_cv][:, None]
+    _tens_cv[:, :, 1] = _dg_cv[_si_cv][:, None]
+    _tens_cv[:, :, 2] = _ug_cv[_si_cv][:, None]
+
+    def _load_curves(omega_p, nn_p):
+        """Return {src: (cov_arr, acc_arr)} or None if pkl files missing.
+
+        NN runs on _X_noisy_cv (noise-unaware).
+        PaTAS feedforward uses _tens_cv (per-sample calibrated trust, noise-aware).
+        PaTAS sources sweep τ ∈ [-1, 1]; NN / combined sweep τ ∈ [0, 1].
+        """
+        if not (os.path.exists(omega_p) and os.path.exists(nn_p)):
+            return None
+        with open(nn_p, "rb") as fh:
+            w = pickle.load(fh)
+        a1 = relu(_X_noisy_cv @ w["W1"] + w["b1"])
+        a2 = softmax(a1 @ w["W2"] + w["b2"])
+        nn_preds = a2.argmax(axis=1)
+
+        with open(omega_p, "rb") as fh:
+            omega_data = pickle.load(fh)
+        omega_thetas = [TensorArrayTO(ow.astype(np.float32)) for ow in omega_data]
+        ptas = PTASClass(
+            omega_thetas=omega_thetas,
+            operator_mapping=None,
+            nn_interface=None,
+            trust_assessment_func=None,
+            structure=[dim, N_HIDDEN, n_classes],
+            use_tensor=True,
+        )
+        Ty2 = ptas.apply_feedforward(TensorArrayTO(_tens_cv), tmp=False)  # (n, cls, 3)
+
+        b_agg    = Ty2.value[idx, nn_preds, 0]
+        d_agg    = Ty2.value[idx, nn_preds, 1]
+        u_agg    = Ty2.value[idx, nn_preds, 2]
+        nn_score = a2[idx, nn_preds]
+
+        # All combined signals = nn_score × normalised PTAS score (∈ [0,1])
+        # (b−d) ∈ [−1,1]       → normalise: (b−d+1)/2
+        # b     ∈ [0,1]         → already normalised
+        # (b−u) ∈ [−1,1]       → normalise: (b−u+1)/2
+        # (b−d−u/2) ∈ [−1,1]  → normalise: (b−d−u/2+1)/2
+        # π=b+u/2 ∈ [0,1]      → already normalised
+        # s = {
+        #     "comb_bd":   nn_score * ((b_agg - d_agg          + 1.0) / 2.0),
+        #     "comb_b": nn_score *   b_agg,
+        #     "comb_bu":   nn_score * ((b_agg - u_agg          + 1.0) / 2.0),
+        #     "comb_bdu":   nn_score * ((b_agg - d_agg - u_agg / 2.0 + 1.0) / 2.0),
+        #     "comb_pi":    nn_score *  (b_agg + u_agg / 2.0),
+        # }
+
+        b_agg_n, d_agg_n, u_agg_n = bdu_with_weights(b_agg, d_agg, u_agg, nn_score)
+        s = {
+            "comb_bd":   ((b_agg_n - d_agg_n          + 1.0) / 2.0),
+            "comb_b": b_agg_n,
+            "comb_bu":   ((b_agg_n - u_agg_n          + 1.0) / 2.0),
+            "comb_bdu":   ((b_agg_n - d_agg_n - u_agg_n / 2.0 + 1.0) / 2.0),
+            "comb_pi":    (b_agg_n + u_agg_n / 2.0),
+        }
+
+        def _sweep(scores, taus_arr):
+            covs = np.empty(len(taus_arr))
+            accs = np.full(len(taus_arr), np.nan)
+            for i, tau in enumerate(taus_arr):
+                mask  = scores >= tau
+                n_cov = int(mask.sum())
+                covs[i] = 100.0 * n_cov / n_test
+                if n_cov > 0:
+                    accs[i] = 100.0 * float(
+                        (nn_preds[mask] == y_test[mask]).mean())
+            return covs, accs
+
+        return {"nn": _sweep(nn_score, taus_nn),
+                **{k: _sweep(v, taus_nn) for k, v in s.items()}}
+
+    axes_spec = [
+        ("feature",
+         "Feature noise",
+         [(os.path.join(output_dir, "data", f"fn_{s:.2f}_ptas-cal-fb_r0", "omega_thetas.pkl"),
+           os.path.join(output_dir, "data", f"fn_{s:.2f}_ptas-cal-fb_r0", "nn_weights.pkl"),
+           f"$\\sigma_{{rel,train}}={s:.2f}$")
+          for s in FEATURE_SIGMAS[:4]]),
+        ("label",
+         "Label noise",
+         [(os.path.join(output_dir, "data", f"ln_{f:.2f}_ptas-cal-fb_r0", "omega_thetas.pkl"),
+           os.path.join(output_dir, "data", f"ln_{f:.2f}_ptas-cal-fb_r0", "nn_weights.pkl"),
+           f"$p_{{train}}={f:.2f}$")
+          for f in LABEL_FLIPS[:4]]),
+        ("combined",
+         "Combined noise",
+         [(os.path.join(output_dir, "data", f"comb_{s:.2f}_{f:.2f}_ptas-cal-fb_r0", "omega_thetas.pkl"),
+           os.path.join(output_dir, "data", f"comb_{s:.2f}_{f:.2f}_ptas-cal-fb_r0", "nn_weights.pkl"),
+           f"$\\sigma_{{train}}={s:.2f},\\,p_{{train}}={f:.2f}$")
+          for s, f in COMBINED[:4]]),
+    ]
+
+    os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
+
+    for ax_key, ax_title, conditions in axes_spec:
+        panels = []
+        for omega_p, nn_p, panel_title in conditions:
+            result = _load_curves(omega_p, nn_p)
+            if result is not None:
+                panels.append((panel_title, result))
+
+        if not panels:
+            continue
+
+        ncols = 2
+        nrows = 2
+
+        fig, axes_arr = plt.subplots(nrows, ncols,
+                                     figsize=(5.5 * ncols, 4.5 * nrows),
+                                     squeeze=False)
+
+        for pi, (panel_title, curves) in enumerate(panels):
+            ax = axes_arr[pi // ncols][pi % ncols]
+            for src in _THR_SOURCES:
+                covs, accs = curves[src]
+                valid = ~np.isnan(accs)
+                if not valid.any():
+                    continue
+                ax.plot(covs[valid], accs[valid],
+                        color=_THR_COLORS[src], lw=2, ls=_THR_LINESTYLES[src],
+                        # marker=_THR_MARKERS[src], markersize=2.5,
+                        label=_THR_LABELS[src])
+                # dot at 100 % coverage (threshold = 0)
+                ax.scatter([covs[0]], [accs[0] if not np.isnan(accs[0]) else np.nan],
+                           color=_THR_COLORS[src], s=35, zorder=5)
+
+            ax.set_title(panel_title, fontsize=10)
+            ax.set_xlabel("Coverage (%)")
+            ax.set_ylabel("Accuracy on covered (%)")
+            ax.set_xlim(-2, 105)
+            ax.legend(fontsize=7, loc="lower left")
+            ax.grid(linestyle=":", alpha=0.4)
+
+        for pi in range(len(panels), nrows * ncols):
+            axes_arr[pi // ncols][pi % ncols].set_visible(False)
+
+        fig.suptitle(ax_title, fontsize=12)
+        fig.tight_layout()
+        path = os.path.join(output_dir, "plots", f"coverage_accuracy_{ax_key}.pdf")
+        fig.savefig(path, bbox_inches="tight")
+        fig.savefig(path.replace(".pdf", ".png"), bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved {path}")
+
+
+# ---------------------------------------------------------------------------
+# Mixed-noise evaluation  (per-sample trust vs. uniform strategies)
+# ---------------------------------------------------------------------------
+
+def eval_mixed_noise(ds, n_classes: int, output_dir: str,
+                     noise_fractions: list = None):
+    """Evaluate per-sample trust under a mixed clean/noisy test set.
+
+    For each trained sigma model and each noise fraction f:
+      - f of test samples receive Gaussian noise at sigma_rel
+      - Clean samples → trusted opinion (1, 0, 0)
+      - Noisy samples → feature_noise_to_trust(sigma_rel)
+
+    Three strategies are compared:
+      per-sample : correct per-sample trust (the ideal)
+      uniform-cal: all samples get calibrated trust (sigma_rel)
+      uniform-tru: all samples get fully trusted opinion
+      nn-softmax : NN softmax score (no trust)
+
+    Produces (one set per sigma with a trained model):
+      plots/mixed_noise_{sigma:.2f}_curves.pdf   — coverage-accuracy per fraction
+      plots/mixed_noise_{sigma:.2f}_separation.pdf — mean π split by noise status
+    """
+    import pickle
+    from noise_utils import add_feature_noise
+
+    try:
+        from patas_module.concrete.TensorTO import TensorArrayTO, normalize_tensor
+        from patas_module.NN.PTAStemplate import PTAS as PTASClass
+        from patas_module.NN.primaryNN import relu, softmax
+    except ImportError:
+        print("  [skip] skipping mixed-noise evaluation")
+        return
+
+    if noise_fractions is None:
+        noise_fractions = [0.0, 0.25, 0.50, 0.75, 1.0]
+
+    y_test  = ds.y_test
+    n_test, dim = ds.X_test.shape
+    idx     = np.arange(n_test)
+    a_base  = 1.0 / n_classes
+    taus    = np.linspace(0.0, 1.0, 300)
+    SEED    = 42
+
+    os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
+
+    # Style for each strategy
+    _S = {
+        "per":  ("#8e44ad", "Per-sample trust",    "-",  "o"),
+        "cal":  ("#c0392b", "Uniform calibrated",  "--", "s"),
+        "tru":  ("#2b7bba", "Uniform trusted",     ":",  "^"),
+        "nn":   ("#555555", "NN softmax",           "-.", "D"),
+    }
+
+    for sigma in FEATURE_SIGMAS:
+        if sigma == 0.0:
+            continue
+
+        omega_p = os.path.join(output_dir, "data",
+                               f"fn_{sigma:.2f}_ptas-cal-fb_r0", "omega_thetas.pkl")
+        nn_p    = os.path.join(output_dir, "data",
+                               f"fn_{sigma:.2f}_ptas-cal-fb_r0", "nn_weights.pkl")
+        if not (os.path.exists(omega_p) and os.path.exists(nn_p)):
+            continue
+
+        with open(omega_p, "rb") as fh:
+            omega_data = pickle.load(fh)
+        omega_thetas = [TensorArrayTO(ow.astype(np.float32)) for ow in omega_data]
+        ptas = PTASClass(
+            omega_thetas=omega_thetas,
+            operator_mapping=None,
+            nn_interface=None,
+            trust_assessment_func=None,
+            structure=[dim, N_HIDDEN, n_classes],
+            use_tensor=True,
+        )
+
+        op_cal = feature_noise_to_trust(sigma)
+        cal_vec = np.array([op_cal.t, op_cal.d, op_cal.u], dtype=np.float32)
+        tru_vec = np.array([1.0, 0.0, 0.0],                dtype=np.float32)
+
+        # Pre-generate a fully noisy X_test for this sigma
+        rng_noise = np.random.default_rng(SEED)
+        X_noisy = add_feature_noise(ds.X_test, sigma, rng=rng_noise).astype(np.float32)
+
+        def _pi(Ty2_value, preds):
+            return Ty2_value[idx, preds, 0] + a_base * Ty2_value[idx, preds, 2]
+
+        def _ff(tens):
+            return ptas.apply_feedforward(TensorArrayTO(tens), tmp=False)
+
+        def _sweep(scores, preds):
+            covs, accs = np.empty(len(taus)), np.full(len(taus), np.nan)
+            for i, tau in enumerate(taus):
+                mask  = scores >= tau
+                n_cov = int(mask.sum())
+                covs[i] = 100.0 * n_cov / n_test
+                if n_cov > 0:
+                    accs[i] = 100.0 * float(
+                        (preds[mask] == y_test[mask]).mean())
+            return covs, accs
+
+        # Collect results per fraction
+        frac_results = []   # list of (frac, noisy_mask, curves_dict, sep_dict)
+
+        for frac in noise_fractions:
+            rng_mask = np.random.default_rng(SEED + int(frac * 1000))
+            noisy_mask = rng_mask.random(n_test) < frac
+
+            # Mixed X: noisy samples from X_noisy, clean from X_test
+            X_mix = ds.X_test.copy().astype(np.float32)
+            X_mix[noisy_mask] = X_noisy[noisy_mask]
+
+            with open(nn_p, "rb") as fh:
+                w = pickle.load(fh)
+            a1 = relu(X_mix @ w["W1"] + w["b1"])
+            a2 = softmax(a1 @ w["W2"] + w["b2"])
+            preds = a2.argmax(axis=1)
+            nn_score = a2[idx, preds]
+
+            # Per-sample trust tensor
+            tens_per = np.tile(tru_vec, (n_test, dim, 1))
+            tens_per[noisy_mask] = cal_vec
+
+            # Uniform calibrated
+            tens_cal = np.broadcast_to(cal_vec, (n_test, dim, 3)).copy()
+
+            # Uniform trusted
+            tens_tru = np.broadcast_to(tru_vec, (n_test, dim, 3)).copy()
+
+            pi_per = _pi(_ff(tens_per).value, preds)
+            pi_cal = _pi(_ff(tens_cal).value, preds)
+            pi_tru = _pi(_ff(tens_tru).value, preds)
+
+            curves = {
+                "per": _sweep(pi_per, preds),
+                "cal": _sweep(pi_cal, preds),
+                "tru": _sweep(pi_tru, preds),
+                "nn":  _sweep(nn_score, preds),
+            }
+
+            # Separation: mean π for clean vs noisy subsets (for strategies that differ)
+            n_clean = int((~noisy_mask).sum())
+            n_noisy = int(noisy_mask.sum())
+            sep = {
+                "per_clean": float(pi_per[~noisy_mask].mean()) if n_clean > 0 else np.nan,
+                "per_noisy": float(pi_per[noisy_mask].mean())  if n_noisy > 0 else np.nan,
+                "cal_clean": float(pi_cal[~noisy_mask].mean()) if n_clean > 0 else np.nan,
+                "cal_noisy": float(pi_cal[noisy_mask].mean())  if n_noisy > 0 else np.nan,
+                "tru_clean": float(pi_tru[~noisy_mask].mean()) if n_clean > 0 else np.nan,
+                "tru_noisy": float(pi_tru[noisy_mask].mean())  if n_noisy > 0 else np.nan,
+                "nn_clean":  float(nn_score[~noisy_mask].mean()) if n_clean > 0 else np.nan,
+                "nn_noisy":  float(nn_score[noisy_mask].mean())  if n_noisy > 0 else np.nan,
+            }
+            frac_results.append((frac, noisy_mask, curves, sep))
+
+        # ---- Figure 1: coverage-accuracy curves ----
+        n_fracs = len(noise_fractions)
+        ncols   = min(n_fracs, 3)
+        nrows   = (n_fracs + ncols - 1) // ncols
+
+        fig1, axes1 = plt.subplots(nrows, ncols,
+                                   figsize=(5.5 * ncols, 4.5 * nrows),
+                                   squeeze=False)
+        for fi, (frac, _, curves, _) in enumerate(frac_results):
+            ax = axes1[fi // ncols][fi % ncols]
+            for key, (color, label, ls, _) in _S.items():
+                covs, accs = curves[key]
+                valid = ~np.isnan(accs)
+                if valid.any():
+                    ax.plot(covs[valid], accs[valid],
+                            color=color, lw=2, ls=ls, label=label)
+            ax.set_title(f"{int(frac*100):d}% noisy", fontsize=10)
+            ax.set_xlabel("Coverage (%)")
+            ax.set_ylabel("Accuracy on covered (%)")
+            ax.set_xlim(-2, 105)
+            ax.legend(fontsize=7, loc="lower right")
+            ax.grid(linestyle=":", alpha=0.4)
+
+        for fi in range(n_fracs, nrows * ncols):
+            axes1[fi // ncols][fi % ncols].set_visible(False)
+
+        fig1.suptitle(
+            f"Mixed noise  σ={sigma:.2f}: coverage-accuracy per strategy",
+            fontsize=12)
+        fig1.tight_layout()
+        path1 = os.path.join(output_dir, "plots",
+                             f"mixed_noise_{sigma:.2f}_curves.pdf")
+        fig1.savefig(path1, bbox_inches="tight")
+        fig1.savefig(path1.replace(".pdf", ".png"), bbox_inches="tight")
+        plt.close(fig1)
+        print(f"  Saved {path1}")
+
+        # ---- Figure 2: mean π separation (clean vs noisy) ----
+        fig2, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(7, 6), sharex=True)
+
+        fracs_x = [r[0] for r in frac_results]
+        sep_styles = {
+            "per":  ("#8e44ad", "Per-sample"),
+            "cal":  ("#c0392b", "Uniform cal."),
+            "tru":  ("#2b7bba", "Uniform tru."),
+            "nn":   ("#555555", "NN softmax"),
+        }
+        for key, (color, lbl) in sep_styles.items():
+            cleans = [r[3][f"{key}_clean"] for r in frac_results]
+            noisys = [r[3][f"{key}_noisy"] for r in frac_results]
+            ax_top.plot(fracs_x, cleans, color=color, lw=2, marker="o",
+                        linestyle="-",  label=f"{lbl} (clean)")
+            ax_top.plot(fracs_x, noisys, color=color, lw=2, marker="s",
+                        linestyle="--", label=f"{lbl} (noisy)")
+
+            gaps = [c - n if not (np.isnan(c) or np.isnan(n)) else np.nan
+                    for c, n in zip(cleans, noisys)]
+            ax_bot.plot(fracs_x, gaps, color=color, lw=2, marker="o",
+                        label=lbl)
+
+        ax_top.set_ylabel(r"Mean $\pi = b + u/K$")
+        ax_top.set_title(f"σ={sigma:.2f}: mean projected probability by noise status")
+        ax_top.legend(fontsize=6, ncol=2)
+        ax_top.grid(linestyle=":", alpha=0.4)
+
+        ax_bot.axhline(0, color="black", lw=0.8)
+        ax_bot.set_xlabel("Fraction of noisy samples")
+        ax_bot.set_ylabel(r"$\Delta\pi$ (clean $-$ noisy)")
+        ax_bot.set_title("Trust separation gap")
+        ax_bot.legend(fontsize=7)
+        ax_bot.grid(linestyle=":", alpha=0.4)
+
+        fig2.tight_layout()
+        path2 = os.path.join(output_dir, "plots",
+                             f"mixed_noise_{sigma:.2f}_separation.pdf")
+        fig2.savefig(path2, bbox_inches="tight")
+        fig2.savefig(path2.replace(".pdf", ".png"), bbox_inches="tight")
+        plt.close(fig2)
+        print(f"  Saved {path2}")
 
 
 # ---------------------------------------------------------------------------
@@ -1113,6 +1824,12 @@ def generate_outputs(all_results: dict, output_dir: str, ds=None, n_classes: int
         print("\nGenerating PTAS effectiveness analysis ...")
         ptas_effectiveness_analysis(ds, n_classes, output_dir)
 
+        print("\nGenerating coverage-accuracy curves ...")
+        plot_coverage_accuracy(ds, n_classes, output_dir)
+
+        print("\nGenerating mixed-noise evaluation ...")
+        # eval_mixed_noise(ds, n_classes, output_dir)
+
         print("\nGenerating Algorithm 5 calibration trust analysis ...")
         calibration_trust_analysis(ds, output_dir)
 
@@ -1121,97 +1838,189 @@ def generate_outputs(all_results: dict, output_dir: str, ds=None, n_classes: int
             latency_analysis(ds, output_dir)
 
 # ---------------------------------------------------------------------------
+# Threshold-eval plot helper
+# ---------------------------------------------------------------------------
+
+def _plot_threshold_eval_results(plot_data: dict, output_dir: str,
+                                  tau: float, filter_expr: str):
+    """Generate coverage and accuracy-on-covered plots for all three opinion sources."""
+    os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
+
+    axes_spec = [
+        ("feature",  "Feature noise",  r"Relative noise $\sigma_{rel}$"),
+        ("label",    "Label noise",    r"Label flip rate $p$"),
+        ("combined", "Combined noise", "Condition"),
+    ]
+
+    for section_key, section_name, x_label in axes_spec:
+        data = plot_data.get(section_key, [])
+        if not data:
+            continue
+
+        is_combined = (section_key == "combined")
+
+        fig, (ax_cov, ax_acc) = plt.subplots(2, 1, figsize=(7, 6),
+                                              sharex=(not is_combined))
+
+        if is_combined:
+            xs      = np.arange(len(data))
+            n_src   = len(_THR_SOURCES)
+            w       = 0.18
+            offsets = [(i - (n_src - 1) / 2) * w for i in range(n_src)]
+            for src, off in zip(_THR_SOURCES, offsets):
+                mcovs = np.array([d[src][0] for d in data])
+                maccs = np.array([d[src][2] for d in data])
+                ax_cov.bar(xs + off, mcovs, w,
+                           color=_THR_COLORS[src], label=_THR_LABELS[src])
+                ax_acc.bar(xs + off, maccs, w, color=_THR_COLORS[src])
+            tick_labels = [d["label"] for d in data]
+            for ax in (ax_cov, ax_acc):
+                ax.set_xticks(xs)
+                ax.set_xticklabels(tick_labels, fontsize=8)
+        else:
+            x_vals = [d["x"] for d in data]
+            for src in _THR_SOURCES:
+                mcovs = np.array([d[src][0] for d in data])
+                scovs = np.array([d[src][1] for d in data])
+                maccs = np.array([d[src][2] for d in data])
+                saccs = np.array([d[src][3] for d in data])
+                ax_cov.plot(x_vals, mcovs, color=_THR_COLORS[src],
+                            marker=_THR_MARKERS[src], lw=2, ms=7,
+                            label=_THR_LABELS[src])
+                ax_cov.fill_between(x_vals, mcovs - scovs, mcovs + scovs,
+                                    alpha=0.15, color=_THR_COLORS[src])
+                ax_acc.plot(x_vals, maccs, color=_THR_COLORS[src],
+                            marker=_THR_MARKERS[src], lw=2, ms=7)
+                ax_acc.fill_between(x_vals, maccs - saccs, maccs + saccs,
+                                    alpha=0.15, color=_THR_COLORS[src])
+            ax_acc.xaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
+
+        ax_cov.set_ylabel("Coverage (%)")
+        ax_cov.set_ylim(0, 108)
+        ax_acc.set_ylabel("Accuracy on covered (%)")
+        ax_acc.set_xlabel(x_label)
+        ax_cov.legend(fontsize=8, ncol=2)
+        ax_cov.set_title(
+            f"{section_name}  —  filter: {filter_expr!r}  (τ={tau:.3f})",
+            fontsize=10,
+        )
+
+        fig.tight_layout()
+        path = os.path.join(output_dir, "plots",
+                            f"threshold_{section_key}_{tau:.2f}.pdf")
+        fig.savefig(path, bbox_inches="tight")
+        fig.savefig(path.replace(".pdf", ".png"), bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved {path}")
+
+
+# ---------------------------------------------------------------------------
 # Belief-threshold selective prediction evaluation
 # ---------------------------------------------------------------------------
 
-def eval_belief_threshold(ds, n_classes: int, output_dir: str, threshold: float):
+def eval_belief_threshold(ds, n_classes: int, output_dir: str, threshold: float,
+                           filter_expr: str = "b >= tau"):
     """Selective prediction across all three noise regimes.
 
-    Three filters evaluated simultaneously per model:
-      Table 1 (PaTAS b≥τ)   : projected probability π = b + u/2 ≥ τ
-      Table 2 (NN score≥τh) : NN softmax score ≥ τ_high = τ + (1−τ)/2
-      Table 3 (b>u)         : PaTAS belief > disbelief (threshold-free)
+    For each PaTAS run, three opinion sources are evaluated, all filtered by
+    the same `filter_expr` (a Python boolean expression in b, d, u, tau):
 
-    Noise regimes covered: feature noise, label noise, combined.
-    Each table has three sections separated by a LaTeX midrule.
+      Source 1 – aggregated : trust propagated feedforward through omega_thetas network
+      Source 2 – output     : ABF-averaged opinion of last-layer weights for predicted class
+      Source 3 – weighted   : per-class propagated opinions blended by NN softmax scores
+
+    NN softmax score ≥ τ is always shown as a baseline.
+    Four LaTeX tables are produced, one per source.
     """
     import pickle
 
     try:
-        from patas_module.concrete.TensorTO import TensorArrayTO
+        from patas_module.concrete.TensorTO import (
+            TensorArrayTO, av_fuse_gen, normalize_tensor,
+        )
         from patas_module.NN.PTAStemplate import PTAS as PTASClass
         from patas_module.NN.primaryNN import relu, softmax
-        from patas_module.concrete.TrustOpinion import TrustOpinion
     except ImportError:
         print("  [skip] patas_module not importable — skipping threshold eval")
         return
 
-    tau_lo = threshold
-    tau_hi = threshold 
+    tau = threshold
 
-    y_test = ds.y_test
+    def _apply_filter(b, d, u):
+        try:
+            return eval(filter_expr,                        # noqa: S307
+                        {"__builtins__": {}},
+                        {"b": b, "d": d, "u": u, "tau": tau, "np": np})
+        except Exception as exc:
+            raise ValueError(f"Invalid filter expression {filter_expr!r}: {exc}") from exc
+
+    y_test  = ds.y_test
     n_test, dim = ds.X_test.shape
+    idx     = np.arange(n_test)
 
-    print(f"\nThreshold evaluation  τ(π) = {tau_lo:.3f}   "
-          f"τ_high(NN) = {tau_hi:.3f}   b>u filter")
+    print(f"\nThreshold evaluation  τ = {tau:.3f}   filter: {filter_expr!r}")
     print(f"  {'cond':<22}  {'run':>3}  "
-          f"{'cov%[b≥τ]':>10}  {'acc%[b≥τ]':>10}  "
-          f"{'cov%[nn≥τh]':>12}  {'acc%[nn≥τh]':>12}  "
-          f"{'cov%[b>u]':>10}  {'acc%[b>u]':>10}  {'acc_all%':>9}")
-    print("  " + "-" * 108)
+          f"{'cov[agg]':>9}  {'acc[agg]':>9}  "
+          f"{'cov[out]':>9}  {'acc[out]':>9}  "
+          f"{'cov[wt]':>8}  {'acc[wt]':>8}  "
+          f"{'cov[nn]':>8}  {'acc[nn]':>8}  {'all%':>7}")
+    print("  " + "-" * 118)
 
-    rows_lo: list[list] = []
-    rows_hi: list[list] = []
-    rows_bd: list[list] = []
+    rows_aggr: list[list] = []
+    rows_out:  list[list] = []
+    rows_wt:   list[list] = []
+    rows_nn:   list[list] = []
 
-    # ---- Build the list of noise conditions --------------------------------
-    # Each entry is either a section marker or a data condition:
-    #   (noise_label, run_dir_fn, bv, dv, uv)
-    # Section markers: ('section', title_str, ncols)
-    NCOLS = 4   # number of LaTeX table columns
+    NCOLS = 4
+
+    # plot_data collects per-condition aggregated results for visual plots
+    plot_data: dict[str, list] = {"feature": [], "label": [], "combined": []}
+    current_section: list[str] = ["feature"]  # mutable ref; updated per section
 
     conditions: list = []
-
-    conditions.append(('section', 'Feature noise ($T_x$ calibrated to $\\sigma_{rel}$)', NCOLS))
+    conditions.append(('section', r'Feature noise ($T_x$ calibrated to $\sigma_{rel}$)', NCOLS, 'feature'))
     for sigma in FEATURE_SIGMAS:
         op = feature_noise_to_trust(sigma)
         conditions.append((
             f"$\\sigma_{{rel}}={sigma:.2f}$",
             (lambda s: (lambda run: f"fn_{s:.2f}_ptas-cal-fb_r{run}"))(sigma),
             float(op.t), float(op.d), float(op.u),
+            sigma,   # x_val for plot
         ))
 
-    conditions.append(('section', 'Label noise ($T_x$ fully trusted)', NCOLS))
+    conditions.append(('section', r'Label noise ($T_x$ fully trusted)', NCOLS, 'label'))
     for flip in LABEL_FLIPS:
         conditions.append((
             f"$p={flip:.2f}$",
             (lambda f: (lambda run: f"ln_{f:.2f}_ptas-cal-fb_r{run}"))(flip),
             1.0, 0.0, 0.0,
+            flip,    # x_val for plot
         ))
 
-    conditions.append(('section', 'Combined noise ($T_x$ calibrated to $\\sigma_{rel}$)', NCOLS))
-    for sigma, flip in COMBINED:
+    conditions.append(('section', r'Combined noise ($T_x$ calibrated to $\sigma_{rel}$)', NCOLS, 'combined'))
+    for i, (sigma, flip) in enumerate(COMBINED):
         op = feature_noise_to_trust(sigma)
         conditions.append((
             f"$\\sigma={sigma:.2f},\\,p={flip:.2f}$",
             (lambda s, f: (lambda run: f"comb_{s:.2f}_{f:.2f}_ptas-cal-fb_r{run}"))(sigma, flip),
             float(op.t), float(op.d), float(op.u),
+            i,       # x_val for plot (index)
         ))
 
-    # ---- Iterate ---------------------------------------------------------
     for cond in conditions:
         if cond[0] == 'section':
-            _, sec_title, ncols = cond
+            _, sec_title, ncols, sec_key = cond
+            current_section[0] = sec_key
             mc = f"\\multicolumn{{{ncols}}}{{l}}{{\\textit{{{sec_title}}}}}"
-            for rows in [rows_lo, rows_hi, rows_bd]:
-                if rows:          # separate sections with a midrule
+            for rows in [rows_aggr, rows_out, rows_wt, rows_nn]:
+                if rows:
                     rows.append(['\\midrule'])
                 rows.append([mc])
             continue
 
-        noise_label, run_dir_fn, bv, dv, uv = cond
-
+        noise_label, run_dir_fn, bv, dv, uv, x_val = cond
         per_run: list[tuple] = []
+
         for run in range(N_RUNS):
             base    = os.path.join(output_dir, "data", run_dir_fn(run))
             omega_p = os.path.join(base, "omega_thetas.pkl")
@@ -1237,14 +2046,28 @@ def eval_belief_threshold(ds, n_classes: int, output_dir: str, threshold: float)
                 use_tensor=True,
             )
             tens = np.empty((n_test, dim, 3), dtype=np.float32)
-            tens[..., 0] = bv
-            tens[..., 1] = dv
-            tens[..., 2] = uv
-            Ty2   = ptas.apply_feedforward(TensorArrayTO(tens), tmp=False)
-            idx   = np.arange(n_test)
-            b_arr = Ty2.value[idx, nn_preds, 0]
-            d_arr = Ty2.value[idx, nn_preds, 1]
-            u_arr = Ty2.value[idx, nn_preds, 2]
+            tens[..., 0] = bv; tens[..., 1] = dv; tens[..., 2] = uv
+            Ty2 = ptas.apply_feedforward(TensorArrayTO(tens), tmp=False)  # (n,cls,3)
+
+            # Source 1 – aggregated: propagated opinion for predicted class
+            b_aggr = Ty2.value[idx, nn_preds, 0]
+            d_aggr = Ty2.value[idx, nn_preds, 1]
+            u_aggr = Ty2.value[idx, nn_preds, 2]
+
+            # Source 2 – output-layer weight opinions (ABF across weight rows)
+            last_w = omega_data[-1].astype(np.float32)   # (hidden+1, output, 3)
+            out_op = av_fuse_gen(last_w, axis=0)          # (output, 3)
+            b_out  = out_op[nn_preds, 0]
+            d_out  = out_op[nn_preds, 1]
+            u_out  = out_op[nn_preds, 2]
+
+            # Source 3 – softmax-weighted blend of all output-class opinions
+            wt_op = np.einsum('ij,ijk->ik', a2, Ty2.value)  # (n, 3)
+            wt_op = normalize_tensor(wt_op)
+            b_wt  = wt_op[:, 0]
+            d_wt  = wt_op[:, 1]
+            u_wt  = wt_op[:, 2]
+
             nn_score = a2[idx, nn_preds]
 
             def _stats(mask):
@@ -1254,16 +2077,22 @@ def eval_belief_threshold(ds, n_classes: int, output_dir: str, threshold: float)
                          if n_cov > 0 else float("nan"))
                 return cov, acc
 
-            cov_lo, acc_lo = _stats(b_arr>= tau_lo)
-            cov_hi, acc_hi = _stats(nn_score >= tau_hi)
-            cov_bd, acc_bd = _stats(b_arr > u_arr)
+            cov_aggr, acc_aggr = _stats(_apply_filter(b_aggr, d_aggr, u_aggr))
+            cov_out,  acc_out  = _stats(_apply_filter(b_out,  d_out,  u_out))
+            cov_wt,   acc_wt   = _stats(_apply_filter(b_wt,   d_wt,   u_wt))
+            cov_nn,   acc_nn   = _stats(nn_score >= tau)
             acc_all = 100.0 * float((nn_preds == y_test).mean())
 
             print(f"  {noise_label:<22}  {run:>3}  "
-                  f"{cov_lo:>10.1f}  {acc_lo:>10.2f}  "
-                  f"{cov_hi:>12.1f}  {acc_hi:>12.2f}  "
-                  f"{cov_bd:>10.1f}  {acc_bd:>10.2f}  {acc_all:>9.2f}")
-            per_run.append((cov_lo, acc_lo, cov_hi, acc_hi, cov_bd, acc_bd, acc_all))
+                  f"{cov_aggr:>9.1f}  {acc_aggr:>9.2f}  "
+                  f"{cov_out:>9.1f}  {acc_out:>9.2f}  "
+                  f"{cov_wt:>8.1f}  {acc_wt:>8.2f}  "
+                  f"{cov_nn:>8.1f}  {acc_nn:>8.2f}  {acc_all:>7.2f}")
+            per_run.append((cov_aggr, acc_aggr,
+                            cov_out,  acc_out,
+                            cov_wt,   acc_wt,
+                            cov_nn,   acc_nn,
+                            acc_all))
 
         if not per_run:
             continue
@@ -1286,16 +2115,31 @@ def eval_belief_threshold(ds, n_classes: int, output_dir: str, threshold: float)
                     f"{m_all:.2f}",
                 ])
 
-        _append(_agg([0, 1, 6]), rows_lo)
-        _append(_agg([2, 3, 6]), rows_hi)
-        _append(_agg([4, 5, 6]), rows_bd)
+        _append(_agg([0, 1, 8]), rows_aggr)
+        _append(_agg([2, 3, 8]), rows_out)
+        _append(_agg([4, 5, 8]), rows_wt)
+        _append(_agg([6, 7, 8]), rows_nn)
 
-    # Strip leading section/midrule rows that have no data rows after them
+        def _extract(col_indices):
+            r = _agg(col_indices)
+            if r is None:
+                return (float("nan"), 0.0, float("nan"), 0.0)
+            (mcov, macc, _), (scov, sacc, _) = r
+            return (mcov, scov, macc, sacc)
+
+        plot_data[current_section[0]].append({
+            "x":     x_val,
+            "label": noise_label,
+            "agg":  _extract([0, 1, 8]),
+            "out":   _extract([2, 3, 8]),
+            "wt":    _extract([4, 5, 8]),
+            "nn":    _extract([6, 7, 8]),
+        })
+
     def _clean(rows):
         out = []
         for i, r in enumerate(rows):
             if r[0] in ('\\midrule',) or r[0].startswith('\\multicolumn'):
-                # keep only if there is at least one data row after this
                 rest = rows[i + 1:]
                 has_data = any(
                     not (rr[0] in ('\\midrule',) or rr[0].startswith('\\multicolumn'))
@@ -1307,13 +2151,14 @@ def eval_belief_threshold(ds, n_classes: int, output_dir: str, threshold: float)
                 out.append(r)
         return out
 
-    rows_lo = _clean(rows_lo)
-    rows_hi = _clean(rows_hi)
-    rows_bd = _clean(rows_bd)
+    rows_aggr = _clean(rows_aggr)
+    rows_out  = _clean(rows_out)
+    rows_wt   = _clean(rows_wt)
+    rows_nn   = _clean(rows_nn)
 
     if not any(
         not (r[0] in ('\\midrule',) or r[0].startswith('\\multicolumn'))
-        for rows in [rows_lo, rows_hi, rows_bd] for r in rows
+        for rows in [rows_aggr, rows_out, rows_wt, rows_nn] for r in rows
     ):
         print("  No saved models found — run experiments first.")
         return
@@ -1325,33 +2170,39 @@ def eval_belief_threshold(ds, n_classes: int, output_dir: str, threshold: float)
         r"Accuracy on covered (\%)",
         r"Overall accuracy (\%)",
     ]
+    filt_latex = (filter_expr
+                  .replace(">=", r"$\geq$")
+                  .replace("<=", r"$\leq$")
+                  .replace("tau", r"$\tau$"))
 
     table_specs = [
         (
-            rows_lo, f"patas_{tau_lo:.2f}",
-            f"Selective prediction: PaTAS projected probability threshold $\\tau = {tau_lo:.3f}$. "
-            r"Coverage is the fraction of test samples where $\pi = b + u/2 \geq \tau$ "
-            r"in the NN's predicted class. "
-            r"Values are mean $\pm$ std over " + str(N_RUNS) + r" independent runs.",
-            "tab:threshold-patas-" + f"{tau_lo:.2f}".replace(".", "-"),
+            rows_aggr, f"patas_aggr_{tau:.2f}",
+            (f"Selective prediction — \\textbf{{aggregated opinion}}: filter \\texttt{{{filt_latex}}}, "
+             r"trust propagated feedforward through the full $\omega$-network. "
+             r"Values are mean $\pm$ std over " + str(N_RUNS) + r" runs."),
+            f"tab:thresh-aggr-{str(tau).replace('.', '-')}",
         ),
         (
-            rows_hi, f"nn_{tau_hi:.2f}",
-            f"Selective prediction: NN softmax score threshold "
-            f"$\\tau_{{\\mathrm{{high}}}} = {tau_hi:.3f} = \\tau + (1-\\tau)/2$, "
-            f"$\\tau = {tau_lo:.3f}$. "
-            r"Coverage is the fraction of test samples where the NN softmax probability "
-            r"in the predicted class exceeds $\tau_{\mathrm{high}}$. "
-            r"Values are mean $\pm$ std over " + str(N_RUNS) + r" independent runs.",
-            "tab:threshold-nn-" + f"{tau_hi:.2f}".replace(".", "-"),
+            rows_out, f"patas_out_{tau:.2f}",
+            (f"Selective prediction — \\textbf{{output-layer opinion}}: filter \\texttt{{{filt_latex}}}, "
+             r"ABF-averaged opinion of last-layer $\omega$-weights for the predicted class. "
+             r"Values are mean $\pm$ std over " + str(N_RUNS) + r" runs."),
+            f"tab:thresh-out-{str(tau).replace('.', '-')}",
         ),
         (
-            rows_bd, "patas_b_gt_d",
-            r"Selective prediction: PaTAS belief-over-disbelief filter ($b > d$). "
-            r"Coverage is the fraction of test samples where PaTAS belief exceeds "
-            r"disbelief in the NN's predicted class (net positive subjective evidence). "
-            r"Values are mean $\pm$ std over " + str(N_RUNS) + r" independent runs.",
-            "tab:threshold-b-gt-d",
+            rows_wt, f"patas_wt_{tau:.2f}",
+            (f"Selective prediction — \\textbf{{weighted opinion}}: filter \\texttt{{{filt_latex}}}, "
+             r"propagated opinions for all output classes blended by NN softmax probabilities. "
+             r"Values are mean $\pm$ std over " + str(N_RUNS) + r" runs."),
+            f"tab:thresh-wt-{str(tau).replace('.', '-')}",
+        ),
+        (
+            rows_nn, f"nn_{tau:.2f}",
+            (f"Selective prediction — \\textbf{{NN softmax baseline}}: "
+             f"softmax score $\\geq \\tau = {tau:.3f}$ for the predicted class. "
+             r"Values are mean $\pm$ std over " + str(N_RUNS) + r" runs."),
+            f"tab:thresh-nn-{str(tau).replace('.', '-')}",
         ),
     ]
     for rows, slug, caption, label in table_specs:
@@ -1363,6 +2214,7 @@ def eval_belief_threshold(ds, n_classes: int, output_dir: str, threshold: float)
             fh.write(tex)
         print(f"\n  LaTeX table saved to {tpath}")
 
+    _plot_threshold_eval_results(plot_data, output_dir, tau, filter_expr)
 
 
 # ---------------------------------------------------------------------------
@@ -1400,9 +2252,14 @@ if __name__ == "__main__":
                     help="Skip training; regenerate plots from cached results")
     ap.add_argument("--threshold", type=float, default=None,
                     metavar="TAU",
-                    help="Belief threshold τ: report selective-prediction accuracy "
-                         "on test samples where PaTAS belief ≥ τ (requires saved models). "
-                         "Can be combined with --plots-only to skip retraining.")
+                    help="Belief threshold τ used in the default filter 'b >= tau' "
+                         "(requires saved models). Can be combined with --plots-only.")
+    ap.add_argument("--filter", default="b >= tau",
+                    metavar="EXPR",
+                    help="PaTAS selective-prediction filter: a Python boolean expression "
+                         "in b, d, u, tau applied to each opinion source. "
+                         "Default: 'b >= tau'. Examples: 'b > u', 'b - d >= 0.3', "
+                         "'(b + u/2) >= tau'")
     ap.add_argument("--latency", action="store_true",
                     help="Run latency benchmark (inference + training overhead).")
     args = ap.parse_args()
@@ -1431,7 +2288,8 @@ if __name__ == "__main__":
             if _ds is None:
                 print("Dataset unavailable — cannot run threshold evaluation.")
             else:
-                eval_belief_threshold(_ds, _nc, args.output, args.threshold)
+                eval_belief_threshold(_ds, _nc, args.output, args.threshold,
+                                      filter_expr=args.filter)
     else:
         all_results, ds, n_classes = run_all(args.data_dir, args.output,
                                              force=args.force)
