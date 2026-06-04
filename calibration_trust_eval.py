@@ -37,14 +37,18 @@ from __future__ import annotations
 
 import os
 import pickle
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from patas_module.subjective_logic import Opinion, bpq, fuse_many
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(__file__), "sl_calibration"))
+import pandas as pd
+from analysis import compute_global_opinion, build_cluster_lookup, get_per_prediction_trust
+from patas_module.subjective_logic import Opinion
 
 # ---------------------------------------------------------------------------
 # Plot style (matches eval_5g_noise.py)
@@ -52,26 +56,21 @@ from patas_module.subjective_logic import Opinion, bpq, fuse_many
 
 plt.rcParams.update({
     "font.family":       "serif",
-    "font.size":         11,
-    "axes.titlesize":    12,
-    "axes.labelsize":    11,
-    "legend.fontsize":   9,
-    "xtick.labelsize":   9,
-    "ytick.labelsize":   9,
+    "font.size":         16,
+    "axes.titlesize":    16,
+    "axes.labelsize":    16,
+    "legend.fontsize":   16,
+    "xtick.labelsize":   16,
+    "ytick.labelsize":   16,
     "axes.spines.top":   False,
     "axes.spines.right": False,
     "figure.dpi":        150,
+    "legend.fontsize":   14,
 })
 
 _C = {"b": "#2b7bba", "d": "#c0392b", "u": "#e07b39"}
 
-FEATURE_SIGMAS = [0, 0.1, 0.3, 0.5]
-LABEL_FLIPS    = [0, 0.05, 0.15, 0.30]
-COMBINED       = [(0.1, 0.05), (0.3, 0.15), (0.5, 0.30)]
-N_RUNS         = 5
-N_HIDDEN       = 32
-
-
+from hyperparams import FEATURE_SIGMAS, LABEL_FLIPS, COMBINED, N_RUNS
 # ---------------------------------------------------------------------------
 # Algorithm 5: Calibration Trust
 # ---------------------------------------------------------------------------
@@ -80,7 +79,6 @@ def calibration_trust(
     y_true: np.ndarray,
     y_prob: np.ndarray,
     n_clusters: int = 10,
-    W: float = 2.0,
 ) -> Opinion:
     """Algorithm 5: assess NN trust from predicted-probability calibration.
 
@@ -89,7 +87,6 @@ def calibration_trust(
     y_true     : (n,) integer class labels
     y_prob     : (n, K) softmax probability matrix
     n_clusters : number of uniform bins M over [0, 1]
-    W          : prior weight for BPQ baseline-prior quantification (W=2)
 
     Returns
     -------
@@ -97,40 +94,11 @@ def calibration_trust(
     """
     if y_prob.ndim != 2:
         raise ValueError("y_prob must be (n_samples, n_classes)")
-    n_samples, n_classes = y_prob.shape
-
-    class_opinions: List[Opinion] = []
-
-    for c in range(n_classes):
-        p_c  = y_prob[:, c]       # predicted probability for class c
-        is_c = (y_true == c)      # ground-truth membership
-
-        cluster_opinions: List[Opinion] = []
-        for i in range(n_clusters):
-            lo   = i / n_clusters
-            hi   = (i + 1) / n_clusters
-            RP_i = (lo + hi) / 2   # representative probability
-
-            # Last bin is closed on the right so p=1.0 is included
-            mask = (p_c >= lo) & (p_c < hi) if i < n_clusters - 1 else (p_c >= lo) & (p_c <= hi)
-
-            n_i = int(mask.sum())
-            if n_i == 0:
-                continue
-
-            t_i = float(is_c[mask].sum())        # "good classifications"
-            r   = t_i                             # positive evidence
-            s   = abs(t_i - n_i * RP_i)          # calibration deviation
-
-            cluster_opinions.append(bpq(r, s, W=W))
-
-        if cluster_opinions:
-            class_opinions.append(fuse_many(cluster_opinions, how="cumulative"))
-
-    if not class_opinions:
-        return Opinion(0.0, 0.0, 1.0)
-
-    return fuse_many(class_opinions, how="cumulative")
+    cols = [f"Class_{i}_Probability" for i in range(y_prob.shape[1])]
+    df = pd.DataFrame(y_prob, columns=cols)
+    df["True Label"] = y_true
+    op = compute_global_opinion(df, n_clusters=n_clusters)
+    return Opinion(op.t, op.d, op.u)
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +237,248 @@ def _plot_trust_panel(
 
 
 # ---------------------------------------------------------------------------
+# Dynamic trust assessment and calibration coverage helpers
+# ---------------------------------------------------------------------------
+
+_CAL_COLORS = {"nn": "#555555", "cal_pi": _C["u"]}
+_CAL_LABELS = {"nn": r"NN softmax $\hat{p}$",
+               "cal_pi": r"Cal. trust $\pi = b + u/2$"}
+
+
+def _get_per_prediction(
+    nn_pkl_path: str,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    n_clusters: int = 10,
+) -> Optional[dict]:
+    """Load NN, build cluster lookup, return per-prediction trust dict."""
+    y_prob = _nn_softmax(nn_pkl_path, X_test)
+    if y_prob is None:
+        return None
+    n_cls = y_prob.shape[1]
+    df = pd.DataFrame(y_prob,
+                      columns=[f"Class_{i}_Probability" for i in range(n_cls)])
+    df["True Label"] = y_test
+    lookup = build_cluster_lookup(df, n_clusters=n_clusters)
+    return get_per_prediction_trust(df, lookup, n_clusters=n_clusters)
+
+
+def _coverage_sweep(
+    scores: np.ndarray, correct: np.ndarray, n_test: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Sweep threshold τ over scores; return (coverage%, accuracy%) arrays."""
+    finite = scores[np.isfinite(scores)]
+    if len(finite) == 0:
+        return np.array([100.0]), np.array([np.nan])
+    taus = np.unique(np.quantile(finite, np.linspace(0, 1, 400)))
+    covs = np.empty(len(taus))
+    accs = np.full(len(taus), np.nan)
+    for i, tau in enumerate(taus):
+        mask  = scores >= tau
+        n_cov = int(mask.sum())
+        covs[i] = 100.0 * n_cov / n_test
+        if n_cov > 0:
+            accs[i] = 100.0 * float(correct[mask].mean())
+    return covs, accs
+
+
+def plot_dynamic_trust(
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    conditions: list,
+    plots_dir: str,
+    axis_name: str,
+    axis_title: str,
+    n_clusters: int = 10,
+) -> None:
+    """3-panel dynamic trust assessment figure (one row per noise condition).
+
+    Panels: confidence distribution | belief distribution |
+            mean b/d/u per confidence bin.
+    """
+    valid = [(lbl, pkl) for lbl, pkl in conditions if os.path.exists(pkl)]
+    if not valid:
+        return
+
+    bin_edges   = np.linspace(0, 1, n_clusters + 1)
+    bin_centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    bw          = (bin_edges[1] - bin_edges[0]) * 0.85
+
+    n_rows = len(valid)
+    fig, axes = plt.subplots(n_rows, 3, figsize=(13, 3.5 * n_rows),
+                             gridspec_kw={"wspace": 0.35, "hspace": 0.5})
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]
+
+    for row, (lbl, pkl) in enumerate(valid):
+        res = _get_per_prediction(pkl, X_test, y_test, n_clusters)
+        if res is None:
+            for c in range(3):
+                axes[row, c].set_visible(False)
+            continue
+
+        confidence = res["confidence"]
+        belief     = res["belief"]
+        correct    = res["correct"]
+
+        def _stacked(ax, vals, xlabel, title, log_weighted=False, _correct=correct):
+            tc, _ = np.histogram(vals, bins=bin_edges)
+            cc, _ = np.histogram(vals[_correct], bins=bin_edges)
+            safe    = np.maximum(tc, 1)
+            heights = np.log1p(tc.astype(float)) if log_weighted else np.where(tc > 0, 1.0, 0.0)
+            h_c = heights * cc / safe
+            h_i = heights * (tc - cc) / safe
+            ax.bar(bin_centres, h_c, width=bw,
+                   color=_C["b"], alpha=0.75, label="Correct")
+            ax.bar(bin_centres, h_i, width=bw,
+                   color=_C["d"], alpha=0.75, label="Incorrect", bottom=h_c)
+            y_top = heights.max() if heights.max() > 0 else 1.0
+            for cx, tot, h in zip(bin_centres, tc, heights):
+                if tot > 0:
+                    ax.text(cx, h + y_top * 0.02, str(int(tot)),
+                            ha="center", va="bottom", fontsize=5, rotation=90)
+            ax.set_xlabel(xlabel, fontsize=9)
+            ylabel = (r"$\log(1+n)$" if log_weighted else "Proportion")
+            ax.set_ylabel(ylabel if row == 0 else "", fontsize=9)
+            ax.set_title(title if row == 0 else "", fontsize=9)
+            ax.legend(fontsize=7)
+            ax.set_ylim(0, y_top * 1.35)
+            ax.grid(axis="y", linestyle=":", alpha=0.3)
+
+        _stacked(axes[row, 0], confidence,
+                 "Predicted confidence", "Confidence Distribution", log_weighted=True)
+        _stacked(axes[row, 1], belief,
+                 r"Trust belief $b$", "Belief Distribution")
+
+        ax = axes[row, 2]
+        mb, md, mu = [], [], []
+        _W = 2.0
+        for i in range(n_clusters):
+            m = (confidence > bin_edges[i]) & (confidence <= bin_edges[i + 1])
+            n_bin = int(m.sum())
+            if n_bin == 0:
+                mb.append(np.nan); md.append(np.nan); mu.append(np.nan)
+                continue
+            # BPQ directly on this argmax-confidence bin so that u reflects
+            # the actual sample count, not the larger per-class lookup pool.
+            n_correct = int(correct[m].sum())
+            rp        = bin_centres[i]
+            r_bpq     = float(n_correct)
+            s_bpq     = abs(n_correct - n_bin * rp)
+            denom     = r_bpq + s_bpq + _W
+            mb.append(r_bpq / denom)
+            md.append(s_bpq / denom)
+            mu.append(_W    / denom)
+        ax.plot(bin_centres, mb, "o-",  color=_C["b"], lw=1.8, ms=4,
+                label=r"Belief $b$")
+        ax.plot(bin_centres, md, "s--", color=_C["d"], lw=1.8, ms=4,
+                label=r"Disbelief $d$")
+        ax.plot(bin_centres, mu, "^:",  color=_C["u"], lw=1.8, ms=4,
+                label=r"Uncertainty $u$")
+        ax.set_xlabel("Predicted confidence", fontsize=9)
+        ax.set_ylabel("Mean opinion" if row == 0 else "", fontsize=9)
+        ax.set_title("Mean Trust per Confidence Bin" if row == 0 else "",
+                     fontsize=9)
+        ax.legend(fontsize=7)
+        ax.set_xlim(-0.02, 1.02)
+        ax.set_ylim(0, 1)
+        ax.grid(linestyle=":", alpha=0.3)
+
+        axes[row, 0].annotate(lbl, xy=(-0.35, 0.5), xycoords="axes fraction",
+                              rotation=90, va="center", ha="center",
+                              fontsize=8, fontweight="bold")
+
+    fig.suptitle(
+        f"Dynamic Trust Assessment — {axis_title} (M={n_clusters} bins)",
+        fontsize=11,
+    )
+    fig.tight_layout()
+    for ext in ("pdf", "png"):
+        fig.savefig(os.path.join(plots_dir, f"dynamic_trust_{axis_name}.{ext}"),
+                    bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved {os.path.join(plots_dir, f'dynamic_trust_{axis_name}.pdf')}")
+
+
+def plot_calibration_coverage(
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    conditions: list,
+    plots_dir: str,
+    axis_name: str,
+    axis_title: str,
+    n_clusters: int = 10,
+) -> None:
+    """Coverage-accuracy curves: calibration π = b + u/2 vs. NN softmax."""
+    valid = [(lbl, pkl) for lbl, pkl in conditions if os.path.exists(pkl)]
+    if not valid:
+        return
+
+    n_cond = len(valid)
+    ncols  = min(n_cond, 2)
+    nrows  = (n_cond + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols,
+                             figsize=(5.5 * ncols, 4.5 * nrows),
+                             squeeze=False)
+
+    n_test = len(y_test)
+    for idx, (lbl, pkl) in enumerate(valid):
+        ax = axes[idx // ncols][idx % ncols]
+
+        y_prob = _nn_softmax(pkl, X_test)
+        if y_prob is None:
+            ax.set_visible(False)
+            continue
+
+        nn_pred = y_prob.argmax(axis=1)
+        correct = (nn_pred == y_test)
+
+        n_cls = y_prob.shape[1]
+        df = pd.DataFrame(y_prob,
+                          columns=[f"Class_{i}_Probability" for i in range(n_cls)])
+        df["True Label"] = y_test
+        lookup = build_cluster_lookup(df, n_clusters=n_clusters)
+        res    = get_per_prediction_trust(df, lookup, n_clusters=n_clusters)
+        pi_cal = res["belief"] + 0.5 * res["uncertainty"]
+
+        for key, scores in [("nn", y_prob.max(axis=1)), ("cal_pi", pi_cal)]:
+            covs, accs = _coverage_sweep(scores, correct, n_test)
+            valid_mask = ~np.isnan(accs)
+            if not valid_mask.any():
+                continue
+            ax.plot(covs[valid_mask], accs[valid_mask],
+                    color=_CAL_COLORS[key], lw=2, label=_CAL_LABELS[key])
+            if not np.isnan(accs[0]):
+                ax.scatter([covs[0]], [accs[0]],
+                           color=_CAL_COLORS[key], s=35, zorder=5)
+
+        ax.set_title(lbl, fontsize=9)
+        ax.set_xlabel("Coverage (%)")
+        ax.set_ylabel("Accuracy on covered (%)")
+        ax.set_xlim(-2, 105)
+        ax.legend(fontsize=7, loc="lower left")
+        ax.grid(linestyle=":", alpha=0.4)
+
+    for idx in range(n_cond, nrows * ncols):
+        axes[idx // ncols][idx % ncols].set_visible(False)
+
+    fig.suptitle(
+        f"Calibration-based Coverage-Accuracy — {axis_title}\n"
+        r"($\pi = b + u/2$ threshold vs.\ NN softmax)",
+        fontsize=11,
+    )
+    fig.tight_layout()
+    for ext in ("pdf", "png"):
+        fig.savefig(
+            os.path.join(plots_dir,
+                         f"coverage_accuracy_calibration_{axis_name}.{ext}"),
+            bbox_inches="tight",
+        )
+    plt.close(fig)
+    print(f"  Saved coverage_accuracy_calibration_{axis_name}.pdf")
+
+
+# ---------------------------------------------------------------------------
 # Main analysis entry point
 # ---------------------------------------------------------------------------
 
@@ -375,7 +585,7 @@ def calibration_trust_analysis(ds, output_dir: str, n_clusters: int = 10):
     # ------------------------------------------------------------------
     # Plot — 2×3 grid: (top/bot rows) × (feature / label / combined cols)
     # ------------------------------------------------------------------
-    fig, axes = plt.subplots(2, 2, figsize=(15, 7),
+    fig, axes = plt.subplots(2, 3, figsize=(15, 7),
                              gridspec_kw={"height_ratios": [2, 1]})
 
     _plot_trust_panel(
@@ -389,19 +599,19 @@ def calibration_trust_analysis(ds, output_dir: str, n_clusters: int = 10):
     )
     axes[0, 0].set_title(r"Feature noise ($\sigma_{rel}$-calibrated $T_x$)", fontsize=10)
 
-    # _plot_trust_panel(
-    #     axes[0, 1], axes[1, 1],
-    #     LABEL_FLIPS,
-    #     ln_b_means, ln_b_stds,
-    #     ln_d_means, ln_d_stds,
-    #     ln_u_means, ln_u_stds,
-    #     xlabel=r"Label flip rate $p$",
-    #     show_ylabel=False,
-    # )
-    # axes[0, 1].set_title("Label noise (trusted $T_x$)", fontsize=10)
-
     _plot_trust_panel(
         axes[0, 1], axes[1, 1],
+        LABEL_FLIPS,
+        ln_b_means, ln_b_stds,
+        ln_d_means, ln_d_stds,
+        ln_u_means, ln_u_stds,
+        xlabel=r"Label flip rate $p$",
+        show_ylabel=False,
+    )
+    axes[0, 2].set_title("Label noise (trusted $T_x$)", fontsize=10)
+
+    _plot_trust_panel(
+        axes[0, 2], axes[1, 2],
         cb_x,
         cb_b_means, cb_b_stds,
         cb_d_means, cb_d_stds,
@@ -410,7 +620,7 @@ def calibration_trust_analysis(ds, output_dir: str, n_clusters: int = 10):
         tick_labels=cb_ticks,
         show_ylabel=False,
     )
-    axes[0, 1].set_title("Combined noise ($T_x$ calibrated)", fontsize=10)
+    axes[0, 2].set_title("Combined noise ($T_x$ calibrated)", fontsize=10)
 
     fig.suptitle(
         "Calibration Trust of trained NNs across noise conditions\n"
@@ -468,6 +678,33 @@ def calibration_trust_analysis(ds, output_dir: str, n_clusters: int = 10):
     with open(tex_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(tex_lines))
     print(f"  Saved {tex_path}")
+
+    # ------------------------------------------------------------------
+    # Dynamic trust assessment and calibration coverage plots
+    # ------------------------------------------------------------------
+    _axes_spec = [
+        ("feature",  r"Feature noise",
+         [(f"$\\sigma_{{rel}}={s:.2f}$",
+           os.path.join(data_dir, f"fn_{s:.2f}_ptas-cal-fb_r0", "nn_weights.pkl"))
+          for s in FEATURE_SIGMAS[:4]]),
+        ("label",    "Label noise",
+         [(f"$p={f:.2f}$",
+           os.path.join(data_dir, f"ln_{f:.2f}_ptas-cal-fb_r0", "nn_weights.pkl"))
+          for f in LABEL_FLIPS[:4]]),
+        ("combined", "Combined noise",
+         [(f"$\\sigma={s:.2f},\\,p={f:.2f}$",
+           os.path.join(data_dir, f"comb_{s:.2f}_{f:.2f}_ptas-cal-fb_r0",
+                        "nn_weights.pkl"))
+          for s, f in COMBINED[:4]]),
+    ]
+    print("\nGenerating dynamic trust assessment plots ...")
+    for _axis_name, _axis_title, _conds in _axes_spec:
+        plot_dynamic_trust(X_test, y_test, _conds, plots_dir,
+                           _axis_name, _axis_title, n_clusters)
+    print("\nGenerating calibration coverage plots ...")
+    for _axis_name, _axis_title, _conds in _axes_spec:
+        plot_calibration_coverage(X_test, y_test, _conds, plots_dir,
+                                  _axis_name, _axis_title, n_clusters)
 
     return {
         "fn": list(zip(FEATURE_SIGMAS, fn_b_means, fn_d_means, fn_u_means)),

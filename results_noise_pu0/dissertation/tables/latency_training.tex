@@ -1,0 +1,14 @@
+\begin{table}[ht]
+\centering
+\caption{Training latency (mean $\pm$ std over 3 trials, 5 epochs) for plain NN vs PaTAS-augmented NN training. Overhead / epoch = per-epoch wall-clock difference.}
+\label{tab:latency-training}
+\begin{tabular}{lcccccc}
+\toprule
+Condition & NN total (s) & PaTAS total (s) & NN / epoch (s) & PaTAS / epoch (s) & Overhead / epoch (ms) & Ratio ($\times$) \\
+\midrule
+clean & 0.7$\pm$0.0 & 24.9$\pm$0.4 & 0.13 & 4.98 & 4846 & 37.00 \\
+feature & 0.7$\pm$0.0 & 26.1$\pm$2.0 & 0.14 & 5.23 & 5088 & 38.14 \\
+combined & 0.7$\pm$0.1 & 26.6$\pm$1.2 & 0.14 & 5.31 & 5169 & 36.73 \\
+\bottomrule
+\end{tabular}
+\end{table}

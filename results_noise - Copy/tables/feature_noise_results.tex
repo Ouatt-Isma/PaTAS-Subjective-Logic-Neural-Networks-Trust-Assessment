@@ -1,0 +1,15 @@
+\begin{table}[ht]
+\centering
+\caption{Test accuracy (\%) under feature measurement noise (mean$\pm$std over 5 independent noise draws). $\Delta$ = PaTAS $-$ NN; positive values indicate PaTAS improvement.}
+\label{tab:feature-noise}
+\begin{tabular}{lcccc}
+\toprule
+$\sigma_{rel}$ & Trust opinion $(b,d,u)$ & NN mean$\pm$std (\%) & PaTAS mean$\pm$std (\%) & $\Delta$ (\%) \\
+\midrule
+0.00 & (1.000, 0.000, 0.000) & 84.43$\pm$0.14 & 84.29$\pm$0.00 & -0.14 \\
+0.10 & (0.882, 0.098, 0.020) & 84.30$\pm$0.07 & 84.16$\pm$0.06 & -0.14 \\
+0.20 & (0.739, 0.185, 0.077) & 83.88$\pm$0.05 & 83.70$\pm$0.06 & -0.18 \\
+0.30 & (0.584, 0.251, 0.165) & 83.18$\pm$0.15 & 83.24$\pm$0.13 & +0.06 \\
+\bottomrule
+\end{tabular}
+\end{table}

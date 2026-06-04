@@ -57,10 +57,10 @@ from external_bridge import run_with_external_implementation
 
 plt.rcParams.update({
     "font.family": "serif",
-    "font.size": 11,
-    "axes.titlesize": 12,
-    "axes.labelsize": 11,
-    "legend.fontsize": 10,
+    "font.size": 16,
+    "axes.titlesize": 16,
+    "axes.labelsize": 16,
+    "legend.fontsize": 16,
     "figure.dpi": 150,
     "axes.spines.top": False,
     "axes.spines.right": False,
