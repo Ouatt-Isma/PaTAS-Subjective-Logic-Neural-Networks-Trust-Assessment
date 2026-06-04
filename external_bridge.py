@@ -103,7 +103,7 @@ def lr_constant(base_lr: float) -> _ConstantLR:
 # ---------------------------------------------------------------------------
 
 def build_trust_generator(trust_type: Union[str, TrustOpinion]):
-    """Return a callable (indices_or_n, dim) -> ArrayTO for the given trust type.
+    """Return a callable (indices_or_n, dim) -> TensorArrayTO for the given trust type.
 
     Accepts either a named string ('trusted', 'vacuous', 'distrusted') or
     a TrustOpinion object for custom calibrated opinions.
@@ -111,28 +111,37 @@ def build_trust_generator(trust_type: Union[str, TrustOpinion]):
     The first argument may be an integer n (legacy) or a numpy array of batch
     indices (sent by primaryNN in TRAINING_FEEDFORWARD messages); both are
     handled identically for uniform trust opinions.
+
+    Returns TensorArrayTO (float tensor shape (n, dim, 3)) so that the
+    isinstance check in PTAStemplate.apply_trust_revision passes.  The import
+    is deferred to call-time using the same flat 'concrete.TensorTO' path that
+    PTAStemplate.py uses, which avoids the double-import / two-class-object trap.
     """
     if isinstance(trust_type, TrustOpinion):
         opinion = trust_type
-        def gen(indices_or_n, dim: int) -> ArrayTO:
+        bdu = np.array([opinion.t, opinion.d, opinion.u], dtype=np.float32)
+        def gen(indices_or_n, dim: int):
+            from concrete.TensorTO import TensorArrayTO
             n = int(indices_or_n) if isinstance(indices_or_n, (int, np.integer)) else len(indices_or_n)
-            return ArrayTO(TrustOpinion.fill(shape=(n, dim), value=opinion))
+            arr = np.broadcast_to(bdu, (n, dim, 3)).copy()
+            return TensorArrayTO(arr)
         return gen
 
     _METHOD = {
-        "trusted":    "ftrust",
-        "ftrust":     "ftrust",
+        "trusted":    "trust",
+        "ftrust":     "trust",
         "vacuous":    "vacuous",
-        "distrusted": "fdistrust",
-        "fdistrust":  "fdistrust",
+        "distrusted": "distrust",
+        "fdistrust":  "distrust",
     }
     method = _METHOD.get(trust_type)
     if method is None:
         raise ValueError(f"Unknown trust type: {trust_type!r}")
 
-    def gen(indices_or_n, dim: int) -> ArrayTO:
+    def gen(indices_or_n, dim: int):
+        from concrete.TensorTO import TensorArrayTO, fill as tfill
         n = int(indices_or_n) if isinstance(indices_or_n, (int, np.integer)) else len(indices_or_n)
-        return ArrayTO(TrustOpinion.fill(shape=(n, dim), method=method))
+        return TensorArrayTO(tfill((n, dim), method=method))
     return gen
 
 

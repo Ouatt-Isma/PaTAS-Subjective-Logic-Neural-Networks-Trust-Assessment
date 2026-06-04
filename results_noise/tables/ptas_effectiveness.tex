@@ -1,0 +1,22 @@
+\begin{table}[ht]
+\centering
+\caption{Mean PaTAS opinion masses $(b, d, u)$ in the NN's predicted class, split by correct ($c$) vs.\ wrong ($w$) NN predictions. $\Delta = \text{correct} - \text{wrong}$; positive $\Delta b$ and negative $\Delta d$/$\Delta u$ indicate discriminability.}
+\label{tab:ptas-effectiveness}
+\begin{tabular}{lccccccccccc}
+\toprule
+Noise & $N_c$ & $N_w$ & $\bar{b}_c$ & $\bar{b}_w$ & $\Delta b$ & $\bar{d}_c$ & $\bar{d}_w$ & $\Delta d$ & $\bar{u}_c$ & $\bar{u}_w$ & $\Delta u$ \\
+\midrule
+\multicolumn{12}{l}{\textit{Feature noise (calibrated query trust)}} \\
+0.00 & 15615 & 2910 & 0.4542 & 0.4118 & +0.0423 & 0.0000 & 0.0000 & +0.0000 & 0.5458 & 0.5882 & -0.0423 \\
+0.10 & 15585 & 2940 & 0.1205 & 0.1072 & +0.0134 & 0.0134 & 0.0119 & +0.0015 & 0.8661 & 0.8809 & -0.0149 \\
+0.30 & 15425 & 3100 & 0.0496 & 0.0448 & +0.0048 & 0.0213 & 0.0192 & +0.0020 & 0.9292 & 0.9360 & -0.0068 \\
+0.50 & 15267 & 3258 & 0.0189 & 0.0150 & +0.0039 & 0.0189 & 0.0150 & +0.0039 & 0.9622 & 0.9700 & -0.0078 \\
+\midrule \\
+\multicolumn{12}{l}{\textit{Label noise (clean query trust)}} \\
+0.30 & 15472 & 3053 & 0.0000 & 0.0000 & -0.0000 & 0.0000 & 0.0000 & +0.0000 & 1.0000 & 1.0000 & +0.0000 \\
+\midrule \\
+\multicolumn{12}{l}{\textit{Combined noise (calibrated query trust)}} \\
+(0.50, 0.30) & 15136 & 3389 & 0.0114 & 0.0108 & +0.0006 & 0.0114 & 0.0108 & +0.0006 & 0.9772 & 0.9784 & -0.0012 \\
+\bottomrule
+\end{tabular}
+\end{table}
