@@ -498,7 +498,7 @@ def plot_label_noise(all_results: dict, output_dir: str):
                      x_vals=LABEL_FLIPS_plots,
                      xlabel=r"Label flip rate $p$",
                      xlim=(-0.01, 1.05))
-    ax.set_title("NN: label mislabelling")
+    ax.set_title("NN: label flipping")
     fig.tight_layout()
     path = os.path.join(output_dir, "plots", "label_noise_accuracy.pdf")
     fig.savefig(path, bbox_inches="tight")
