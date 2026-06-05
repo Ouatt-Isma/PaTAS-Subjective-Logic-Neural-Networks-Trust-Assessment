@@ -107,9 +107,9 @@ array([[[2.8439206e-01, 0.0000000e+00, 7.1560794e-01],
 -------------------------------------------------
 
 Apply Feed Forward on fully Trusted Input
-array([[[0.33924198, 0.        , 0.660758  ],
-        [0.33924198, 0.        , 0.660758  ]]], dtype=float32)
-Aggregated Value:  [0.33924198 0.         0.660758  ]
+array([[[0.33924195, 0.        , 0.660758  ],
+        [0.33924195, 0.        , 0.660758  ]]], dtype=float32)
+Aggregated Value:  [0.33924195 0.         0.660758  ]
 
 Apply Feed Forward on Vacuous Input
 array([[[0., 0., 1.],
@@ -117,7 +117,7 @@ array([[[0., 0., 1.],
 Aggregated Value:  [0. 0. 1.]
 
 Apply Feed Forward on fully Untrusted Input
-array([[[0.        , 0.33924198, 0.660758  ],
-        [0.        , 0.33924198, 0.660758  ]]], dtype=float32)
-Aggregated Value:  [0.         0.33924198 0.660758  ]
+array([[[0.        , 0.33924195, 0.660758  ],
+        [0.        , 0.33924195, 0.660758  ]]], dtype=float32)
+Aggregated Value:  [0.         0.33924195 0.660758  ]
 
