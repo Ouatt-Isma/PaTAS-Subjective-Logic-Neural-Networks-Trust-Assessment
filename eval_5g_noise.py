@@ -113,37 +113,26 @@ _THR_SOURCES = list(_THR_COLORS)
 # Experiment grid definition
 # ---------------------------------------------------------------------------
 
-# FEATURE_SIGMAS  = [0, 0.1, 0.2, 0.3, 
-#                 #    0.5, 0.6, 0.7, 0.8, 0.9, 1.0
-#                    ]
-# LABEL_FLIPS     = [0, 0.05, 0.15, 0.30, 
-#                 #    0.50, 1.0
-#                    ]
-
-
-# Both configs run N_RUNS independent noise draws; results are averaged.
 from hyperparams import FEATURE_SIGMAS, LABEL_FLIPS, COMBINED, N_RUNS
 from hyperparams import EPOCHS, BATCH, LR, EPS_LOW, N_HIDDEN, BASE_PORT
 from hyperparams import FEATURE_SIGMAS_plots, LABEL_FLIPS_plots
 
-# CONFIGS         = ["nn", "ptas-obs", "ptas-cal-fb"]
-CONFIGS         = ["nn", "ptas-cal-fb"]
-ACC_PLOTS_CONFIGS = ["nn"]  # subset of CONFIGS to show in accuracy plots
+CONFIGS           = ["nn", "ptas-cal-fb"]
+ACC_PLOTS_CONFIGS = ["nn"]
 
 
 @dataclass
 class ExpSpec:
     """Specification for a single training run."""
-    label: str           # unique identifier  e.g. "fn_0.10_ptas-cal"
-    config: str          # one of CONFIGS
-    sigma: float         # feature noise level (global σ_rel for ptas-percal = sigma_max)
-    flip: float          # label flip rate
+    label: str        # unique identifier  e.g. "fn_0.10_ptas-cal"
+    config: str       # one of CONFIGS
+    sigma: float      # feature noise level
+    flip: float       # label flip rate
     use_ptas: bool
-    x_trust: object      # str | TrustOpinion | "percal"
-    y_trust: object      # str | TrustOpinion
+    x_trust: object   # str | TrustOpinion
+    y_trust: object   # str | TrustOpinion
     port: int = BASE_PORT
-    run_seed: int = 0    # RNG seed for noise injection (varied across N_RUNS for ptas-percal)
-    # trust_feedback: bool = False  # True for ptas-cal-fb: PTAS sends belief scalar back to NN
+    run_seed: int = 0
 
 
 def _build_grid(base_port: int = BASE_PORT) -> list[ExpSpec]:
@@ -172,12 +161,6 @@ def _build_grid(base_port: int = BASE_PORT) -> list[ExpSpec]:
                 use_ptas=False, x_trust="trusted", y_trust="trusted",
                 port=BASE_PORT, run_seed=run,
             ))
-            # specs.append(ExpSpec(
-            #     label=f"fn_{sigma:.2f}_ptas-obs_r{run}",
-            #     config="ptas-obs", sigma=sigma, flip=0.0,
-            #     use_ptas=True, x_trust=xt_cal, y_trust="trusted",
-            #     port=_next_port(), run_seed=run,
-            # ))
             specs.append(ExpSpec(
                 label=f"fn_{sigma:.2f}_ptas-cal-fb_r{run}",
                 config="ptas-cal-fb", sigma=sigma, flip=0.0,
@@ -197,12 +180,6 @@ def _build_grid(base_port: int = BASE_PORT) -> list[ExpSpec]:
                 use_ptas=False, x_trust="trusted", y_trust="trusted",
                 port=BASE_PORT, run_seed=run,
             ))
-            # specs.append(ExpSpec(
-            #     label=f"ln_{flip:.2f}_ptas-obs_r{run}",
-            #     config="ptas-obs", sigma=0.0, flip=flip,
-            #     use_ptas=True, x_trust="trusted", y_trust=yt_cal,
-            #     port=_next_port(), run_seed=run,
-            # ))
             specs.append(ExpSpec(
                 label=f"ln_{flip:.2f}_ptas-cal-fb_r{run}",
                 config="ptas-cal-fb", sigma=0.0, flip=flip,
@@ -251,12 +228,6 @@ def _build_grid(base_port: int = BASE_PORT) -> list[ExpSpec]:
                 use_ptas=False, x_trust="trusted", y_trust="trusted",
                 port=BASE_PORT, run_seed=run,
             ))
-            # specs.append(ExpSpec(
-            #     label=f"comb_{sigma:.2f}_{flip:.2f}_ptas-obs_r{run}",
-            #     config="ptas-obs", sigma=sigma, flip=flip,
-            #     use_ptas=True, x_trust=xt_cal, y_trust=yt_cal,
-            #     port=_next_port(), run_seed=run,
-            # ))
             specs.append(ExpSpec(
                 label=f"comb_{sigma:.2f}_{flip:.2f}_ptas-cal-fb_r{run}",
                 config="ptas-cal-fb", sigma=sigma, flip=flip,
@@ -304,7 +275,7 @@ def run_experiment(
     os.chdir(output_dir)          # results.json will land inside output_dir
     try:
         results = run_with_external_implementation(
-            data_dir=None,          # data already loaded
+            data_dir=None,
             dataset="5g",
             n_hidden=N_HIDDEN,
             epochs=EPOCHS,
@@ -320,7 +291,6 @@ def run_experiment(
             y_train_oh=y_train_oh,
             X_test=X_test,
             y_test_oh=y_test_oh,
-            # trust_feedback=spec.trust_feedback,
         )
     finally:
         os.chdir(orig_cwd)
@@ -914,49 +884,27 @@ def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str):
 
         nn_score = a2[idx, nn_preds]
 
-        # agg: feedforward propagated, predicted class
         _b_agg = Ty2.value[idx, nn_preds, 0]
         _d_agg = Ty2.value[idx, nn_preds, 1]
         _u_agg = Ty2.value[idx, nn_preds, 2]
         agg = bdu_with_weights(_b_agg, _d_agg, _u_agg, nn_score)
-        # out: ABF-averaged last-layer weights, indexed by predicted class
-        # omega_data[-1] shape: (output, ...) — fuse across axis=0 -> (output, 3)
-        # out_fused = av_fuse_gen(omega_data[-1].astype(np.float32), axis=0)  # (output, 3)
-        # out = (out_fused[nn_preds, 0],
-        #        out_fused[nn_preds, 1],
-        #        out_fused[nn_preds, 2])
-
-        # wt: softmax-weighted blend of all output-class opinions
-        # Ty2.value shape: (n_test, n_classes, 3); a2 shape: (n_test, n_classes)
-        # wt_raw = np.einsum('ij,ijk->ik', a2, Ty2.value)  # (n_test, 3)
-        # wt_norm = normalize_tensor(wt_raw)
-        # wt = (wt_norm[:, 0], wt_norm[:, 1], wt_norm[:, 2])
-
         return {"agg": agg}
 
     # ------------------------------------------------------------------
     # Collect metrics — feature noise axis
     # ------------------------------------------------------------------
 
-    # records[src][axis][key] = (b_c, b_w, d_c, d_w, u_c, u_w)
-    records = {
-        "agg": {"fn": {}, "ln": {}, "cb": {}},
-        "out": {"fn": {}, "ln": {}, "cb": {}},
-        "wt":  {"fn": {}, "ln": {}, "cb": {}},
-    }
-    # comb_records[signal][axis][key] = (mean_correct, mean_wrong)
+    records = {"agg": {"fn": {}, "ln": {}, "cb": {}}}
     comb_records = {k: {"fn": {}, "ln": {}, "cb": {}}
                     for k in ("comb_bd", "comb_b",
                                "comb_bu", "comb_bdu", "comb_pi")}
     fn_tex_rows: list[list] = []
 
-    # Test inputs are always clean; trust opinions are calibrated per condition.
-
     for sigma in FEATURE_SIGMAS:
         base    = os.path.join(output_dir, "data")
         omega_p = os.path.join(base, f"fn_{sigma:.2f}_ptas-cal-fb_r0", "omega_thetas.pkl")
         nn_p    = os.path.join(base, f"fn_{sigma:.2f}_ptas-cal-fb_r0", "nn_weights.pkl")
-        nn_preds, a2 = _load_nn(nn_p)   # clean X_test
+        nn_preds, a2 = _load_nn(nn_p)
         if nn_preds is None:
             continue
         correct   = (nn_preds == y_test_int)
@@ -974,7 +922,6 @@ def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str):
         b_agg, d_agg, u_agg = opinions["agg"]
         nn_sc = a2[idx_eff, nn_preds]
         _store_comb(comb_records, "fn", sigma, b_agg, d_agg, u_agg, nn_sc, correct, n_correct, n_wrong)
-        # tex rows from agg only
         b_c, b_w, d_c, d_w, u_c, u_w = records["agg"]["fn"][sigma]
         b_gap = f"{b_c - b_w:+.4f}" if not (np.isnan(b_c) or np.isnan(b_w)) else "—"
         d_gap = f"{d_c - d_w:+.4f}" if not (np.isnan(d_c) or np.isnan(d_w)) else "—"
@@ -997,8 +944,7 @@ def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str):
         base    = os.path.join(output_dir, "data")
         omega_p = os.path.join(base, f"ln_{flip:.2f}_ptas-cal-fb_r0", "omega_thetas.pkl")
         nn_p    = os.path.join(base, f"ln_{flip:.2f}_ptas-cal-fb_r0", "nn_weights.pkl")
-        # Label-noise runs: features are clean; PTAS uses fully trusted opinion.
-        nn_preds, a2 = _load_nn(nn_p)   # clean X_test
+        nn_preds, a2 = _load_nn(nn_p)
         if nn_preds is None:
             continue
         correct   = (nn_preds == y_test_int)
@@ -1040,8 +986,7 @@ def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str):
                                "omega_thetas.pkl")
         nn_p    = os.path.join(base, f"comb_{sigma:.2f}_{flip:.2f}_ptas-cal-fb_r0",
                                "nn_weights.pkl")
-        # Combined: clean X_test; trust calibrated to the feature-noise component.
-        nn_preds, a2 = _load_nn(nn_p)   # clean X_test
+        nn_preds, a2 = _load_nn(nn_p)
         if nn_preds is None:
             continue
         correct   = (nn_preds == y_test_int)
@@ -1071,12 +1016,7 @@ def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str):
             f"{u_c:.4f}", f"{u_w:.4f}", u_gap,
         ])
 
-    # Check if any data was collected across all sources
-    has_data = any(
-        records[src][axis]
-        for src in ["agg"]
-        for axis in ("fn", "ln", "cb")
-    )
+    has_data = any(records["agg"][axis] for axis in ("fn", "ln", "cb"))
     if not has_data:
         print("  [skip] No ptas-cal-fb runs found — skipping effectiveness analysis")
         return
@@ -1089,8 +1029,6 @@ def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str):
 
     src_meta = {
         "agg": ("Aggregated (feedforward propagated)", "patas_effectiveness_agg"),
-        "out": ("Output-layer weights (ABF)",           "patas_effectiveness_out"),
-        "wt":  ("Softmax-weighted blend",              "patas_effectiveness_wt"),
     }
 
     cb_x     = list(range(len(COMBINED)))
@@ -1192,7 +1130,7 @@ def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str):
             ax_bot.axhline(0, color="black", lw=0.8)
             ax_bot.set_xlabel(xlabel)
             if first_col:
-                ax_bot.set_ylabel(r"$\Delta$ (correct $-$ wrong)")
+                ax_bot.set_ylabel(r"$\Delta$")
             ax_bot.set_xlim(*xlim)
             ax_bot.legend(fontsize=8, ncol=3)
             ax_bot.grid(axis="y", linestyle=":", alpha=0.5, zorder=0)
@@ -1532,8 +1470,8 @@ def plot_coverage_accuracy(ds, n_classes: int, output_dir: str):
         if not panels:
             continue
 
-        ncols = 2
-        nrows = 2
+        ncols = 4
+        nrows = 1
 
         fig, axes_arr = plt.subplots(nrows, ncols,
                                      figsize=(5.5 * ncols, 4.5 * nrows),
@@ -1554,17 +1492,17 @@ def plot_coverage_accuracy(ds, n_classes: int, output_dir: str):
                 ax.scatter([covs[0]], [accs[0] if not np.isnan(accs[0]) else np.nan],
                            color=_THR_COLORS[src], s=35, zorder=5)
 
-            ax.set_title(panel_title, fontsize=10)
+            ax.set_title(panel_title, fontsize=16)
             ax.set_xlabel("Coverage (%)")
             ax.set_ylabel("Accuracy on covered (%)")
             ax.set_xlim(-2, 105)
-            ax.legend(fontsize=12, loc="lower left")
+            ax.legend(fontsize=16, loc="lower left")
             ax.grid(linestyle=":", alpha=0.4)
 
         for pi in range(len(panels), nrows * ncols):
             axes_arr[pi // ncols][pi % ncols].set_visible(False)
 
-        fig.suptitle(ax_title, fontsize=12)
+        fig.suptitle(ax_title, fontsize=16)
         fig.tight_layout()
         path = os.path.join(output_dir, "plots", f"coverage_accuracy_{ax_key}.pdf")
         fig.savefig(path, bbox_inches="tight")

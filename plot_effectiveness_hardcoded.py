@@ -136,7 +136,7 @@ for col, (records, x_vals, tick_labels, xlabel, title) in enumerate(panels):
     ax_bot.axhline(0, color="black", lw=0.8)
     ax_bot.set_xlabel(xlabel)
     if col == 0:
-        ax_bot.set_ylabel(r"$\Delta$ (correct $-$ wrong)")
+        ax_bot.set_ylabel(r"$\Delta$")
     ax_bot.set_xlim(*xlim)
     ax_bot.legend(fontsize=6, ncol=3)
     ax_bot.grid(axis="y", linestyle=":", alpha=0.5, zorder=0)
