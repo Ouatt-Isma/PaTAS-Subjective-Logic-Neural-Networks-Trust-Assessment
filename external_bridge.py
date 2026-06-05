@@ -72,13 +72,7 @@ class ExternalConfig:
     # Enable PTAS trust-tracking mode (captures trust mass evolution during training)
     eval: bool = False
 
-    # Per-sample feature trust: sigma_per_sample[i] is the noise level applied
-    # to training sample i.  Set alongside x_trust="percal".
     sigma_per_sample: Optional[np.ndarray] = None
-
-    # When True, PTAS sends back the output trust scalar with each layer-1 ACK
-    # and the NN scales its gradient update by that scalar.
-    # trust_feedback: bool = False
 
 
 # ---------------------------------------------------------------------------

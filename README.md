@@ -1,16 +1,12 @@
-# PaTAS — Parallel Trust Assessment System
+# PaTAS — Parallel Trust Assessment System: 5G Energy Use Case
 
-A complete, self-contained implementation of the **Parallel Trust Assessment
-System (PaTAS)** from the dissertation (Chapters 5–7), applied to:
+This repository contains the complete evaluation code for the **Parallel Trust
+Assessment System (PaTAS)** applied to a 5G network energy-consumption
+classification task, as reported in the PhD dissertation (Chapters 6–7).
 
-1. Classifying the energy-consumption class of a 5G base station from the
-   *5G Network Energy Consumption Dataset* (BSinfo / CLstat / ECstat).
-2. Reproducing **all five experiments** of §6.5, §6.6, and §7.8.
-
-The neural network and PaTAS are implemented in pure NumPy so that every
-gradient and activation is directly visible to the trust machinery, as
-required by Algorithm 5 (Trust Feedforward) and Algorithm 6
-(Parameter-Trust Update).
+The neural network and PaTAS trust engine are implemented via the
+`patas_module` submodule (pure NumPy), making every gradient and subjective-
+logic operation directly visible to the trust machinery.
 
 ## Cloning
 
@@ -24,161 +20,210 @@ git clone --recurse-submodules https://github.com/Ouatt-Isma/PaTAS-Subjective-Lo
 git submodule update --init
 ```
 
-> Run `git submodule update --init` from the **repository root**, not from inside
-> the `patas_module/` directory.
+> Run `git submodule update --init` from the **repository root**, not from
+> inside the `patas_module/` directory.
 
 ## Requirements
 
 ```bash
-# Core (required for all experiments in main.py):
-pip install numpy pandas scikit-learn
-
-# Additional (required for the standalone evaluation/plot scripts):
-pip install matplotlib
+pip install numpy pandas scikit-learn matplotlib
 ```
 
-## Quick start
+## Dataset
+
+The evaluation uses the **5G Network Energy Consumption Dataset** with three
+CSV files placed in `data/`:
+
+| File | Contents |
+|---|---|
+| `BSinfo.csv` | Per-cell static info: RUType, Mode, Bandwidth, Frequency, Antennas, TXpower |
+| `CLstat.csv` | Hourly cell-level statistics: Load, ESMode1–ESMode6 |
+| `ECstat.csv` | Hourly per-BS energy consumption |
+
+`data_loader.py` aggregates cells to BS level, joins the three files, and bins
+energy into three classes (low / mid / high) by empirical quantiles.  A
+synthetic generator (`make_synthetic_5g`) is available when the real CSVs are
+not present.
+
+## Evaluation scripts
+
+### 1. Noise-robustness study — `eval_5g_noise.py`
+
+The main experiment.  Trains and evaluates two configurations across a grid of
+noise conditions, averaged over `N_RUNS = 5` independent noise draws:
+
+| Configuration | Description |
+|---|---|
+| `nn` | Standard NN, no trust reasoning (baseline) |
+| `patas-cal-fb` | PaTAS with trust opinions calibrated to the noise level |
+
+**Noise grid:**
+
+- Feature noise: Gaussian measurement noise at σ ∈ {0, 0.1, 0.3, 0.5}
+- Label noise: random mislabelling at flip rate p ∈ {0, 0.05, 0.15, 0.30}
+- Combined: four (σ, p) pairs covering both noise sources simultaneously
+
+Trust opinions are mapped from noise parameters to subjective-logic triples
+(b, d, u) by `noise_utils.py`:  feature noise grows uncertainty (u), label
+noise grows disbelief (d).
 
 ```bash
-# Main 5G use case — synthetic data (no CSVs needed):
-python main.py 5g
-
-# Main 5G use case — real CSVs:
-python main.py 5g --data-dir ./data
-
-# Individual dissertation experiments:
-python main.py bc           # §7.8.1 Exp 1 — Breast Cancer    (Table 7.2)
-python main.py mnist        # §7.8.1 Exp 2 — MNIST             (Table 7.3)
-python main.py poisoned     # §7.8.1 Exp 3 — Poisoned MNIST    (Tables 7.4-7.5)
-python main.py gtsrb        # §6.5         — Balancing Bias
-python main.py cifar10h     # §6.6         — Labeling Bias
-
-# Run everything (a few minutes on a laptop CPU):
-python main.py all
-
-# Skip slow experiments:
-python main.py all --skip poisoned gtsrb
-
-# List all experiment keys with descriptions:
-python main.py --list
+python eval_5g_noise.py data/              # run all + plot
+python eval_5g_noise.py data/ --force      # re-run even if cached
+python eval_5g_noise.py data/ --plots-only # skip training, plot from cache
 ```
+
+**Outputs** (saved under `results_noise/` by default):
+
+| Path | Content |
+|---|---|
+| `plots/trust_mapping.pdf` | Trust opinion (b, d, u) vs noise parameter |
+| `plots/feature_noise_accuracy.pdf` | NN accuracy vs feature noise level |
+| `plots/label_noise_accuracy.pdf` | NN accuracy vs label flip rate |
+| `plots/combined_accuracy.pdf` | Accuracy under combined noise (grouped bars) |
+| `plots/patas_improvement.pdf` | Δ accuracy = PaTAS − NN across all conditions |
+| `plots/learning_curves.pdf` | Epoch-by-epoch accuracy for selected conditions |
+| `plots/patas_effectiveness_agg.pdf` | PaTAS opinion masses in predicted class (correct vs wrong) |
+| `plots/coverage_accuracy_*.pdf` | Coverage–accuracy curves sweeping confidence threshold |
+| `tables/trust_mapping.tex` | Trust-opinion mapping table |
+| `tables/feature_noise_results.tex` | Per-σ accuracy table (NN vs PaTAS, mean ± std) |
+| `tables/label_noise_results.tex` | Per-p accuracy table |
+| `tables/combined_results.tex` | Combined-noise accuracy table |
+| `tables/patas_effectiveness.tex` | Mean opinion masses split by correct/wrong predictions |
+
+---
+
+### 2. Chapter evaluation — `eval_chapter.py`
+
+Evaluates PaTAS under five canonical trust configurations on the 5G dataset:
+fully trusted, vacuous, trusted features + vacuous labels, distrusted features,
+and fully distrusted.  Produces accuracy comparisons, learning curves, trust-
+mass evolution plots, and weight-opinion heatmaps for the dissertation chapter.
+
+```bash
+python eval_chapter.py data/
+python eval_chapter.py data/ --plots-only
+python eval_chapter.py data/ --force
+python eval_chapter.py data/ --output results_chapter/
+```
+
+**Outputs** (saved under `results_chapter/` by default):
+
+| Path | Content |
+|---|---|
+| `plots/accuracy_comparison.pdf` | Final accuracy bar chart per trust config |
+| `plots/learning_curves.pdf` | Accuracy vs epoch per config |
+| `plots/trust_convergence_tt.pdf` | Trust mass evolution — fully trusted |
+| `plots/trust_convergence_vv.pdf` | Trust mass evolution — vacuous |
+| `plots/trust_convergence_dt.pdf` | Trust mass evolution — distrusted features |
+| `plots/omega_beliefs.pdf` | Heatmap of per-weight belief opinions after training |
+| `tables/accuracy_summary.tex` | Final accuracy and trust mass per config |
+| `tables/trust_masses.tex` | Detailed trust mass summary |
+
+---
+
+### 3. Calibration trust evaluation — `calibration_trust_eval.py`
+
+Implements **Algorithm 5** (Calibration-based Trust Evaluation).  For each
+trained NN, predicted probabilities are binned, and calibration error per bin
+is converted to a binomial opinion (b, d, u) via BPQ.  Class opinions are
+fused with cumulative belief fusion to produce a single trust opinion per model.
+
+Scans cached `nn_weights.pkl` files produced by `eval_5g_noise.py` and writes:
+
+```bash
+python calibration_trust_eval.py results_noise/
+```
+
+**Outputs:**
+
+| Path | Content |
+|---|---|
+| `results_noise/dissertation/plots/calibration_trust.pdf` | Trust opinion (b, d, u) vs noise condition |
+| `results_noise/dissertation/tables/calibration_trust.tex` | Numerical summary table |
+
+---
+
+### 4. Latency benchmark — `latency_eval.py`
+
+Measures **inference** and **training** latency of the NN baseline vs PaTAS.
+
+- **Inference (Part A):** NN forward pass vs `PTAS.apply_feedforward`, varying
+  batch size ∈ {1, 8, 32, 64, 128, 256, 512, 1024}.  Repeated 200 times;
+  median reported.
+- **Training (Part B):** Wall-clock time for one full training run (10 epochs)
+  without vs with PaTAS.  Repeated 5 times; mean ± std reported.
+
+```bash
+python latency_eval.py results_noise/ [--data-dir data/]
+```
+
+**Outputs:**
+
+| Path | Content |
+|---|---|
+| `results_noise/dissertation/plots/latency.pdf` | Inference and training latency plots |
+| `results_noise/dissertation/tables/latency.tex` | Latency summary table |
+
+---
+
+### 5. Hardcoded plots — `plot_effectiveness_hardcoded.py`, `plot_latency_hardcoded.py`
+
+Reproduce the dissertation figures from hardcoded table data — no model files
+required.  Useful for regenerating plots without re-running experiments.
+
+```bash
+python plot_effectiveness_hardcoded.py   # → patas_effectiveness_test.pdf/.png
+python plot_latency_hardcoded.py         # → latency_hardcoded.pdf/.png
+```
+
+---
 
 ## File map
 
-| File | Dissertation section |
+| File | Role |
 |---|---|
-| `main.py` | **Entry point** — run any experiment from the command line |
-| `subjective_logic.py` | SL operators (⊗ ⊕ ⊖ ⊙ ⊘ ⊚) and BPQ / EWQ / CUQ (Eq. 6.3–6.5) |
-| `data_loader.py` | Joins the three 5G CSVs, bins Energy into K classes |
-| `primary_nn.py` | Standard MLP (input → ReLU → softmax), §7.8 family |
-| `patas.py` | Trust Nodes Network (Def. 7.2), Trust Function (Def. 7.4), Trust Feedforward (Alg. 5), Parameter-Trust Update (Alg. 6), GenIPTA / IPTA (§7.3) |
-| `trust_assessment.py` | Chapter 6 dataset trust assessment: (P, S, G) framework |
-| `degradations.py` | Feature/label perturbations and patch injection from §7.8.1 |
-| `training.py` | Shared training loop with optional Parameter-Trust Update |
-| `eval_helpers.py` | Trust under canonical profiles, per-class trust, per-sample IPTA |
-| `train.py` | 5G end-to-end pipeline function `train_and_evaluate()` |
-| `breast_cancer.py` | Experiment 1 — Table 7.2 |
-| `mnist.py` | Experiment 2 — Table 7.3 (sklearn digits proxy) |
-| `poisoned_mnist.py` | Experiment 3 — Tables 7.4-7.5 (sklearn digits proxy) |
-| `gtsrb.py` | Experiment 4 — Balancing Bias (§6.5, Ref. [5]) |
-| `cifar10h.py` | Experiment 5 — Labeling Bias (§6.6, Ref. [6]) |
-| `data/` | Real 5G CSVs (BSinfo.csv, CLstat.csv, ECstat.csv) — field descriptions in [`data/README.md`](data/README.md) |
+| `eval_5g_noise.py` | **Main evaluation** — noise robustness study |
+| `eval_chapter.py` | Chapter evaluation — trust configurations |
+| `calibration_trust_eval.py` | Algorithm 5 — calibration-based trust |
+| `latency_eval.py` | Inference and training latency benchmark |
+| `plot_effectiveness_hardcoded.py` | Reproduce effectiveness figure from hardcoded data |
+| `plot_latency_hardcoded.py` | Reproduce latency figure from hardcoded data |
+| `external_bridge.py` | Adapter connecting eval scripts to `patas_module` |
+| `data_loader.py` | 5G dataset loader and synthetic generator |
+| `noise_utils.py` | Noise injection and trust-opinion mapping |
+| `hyperparams.py` | Shared hyperparameters (grid, epochs, LR, hidden size) |
+| `subjective_logic.py` | Shim re-exporting SL operators from `patas_module` |
+| `degradations.py` | Feature/label perturbation functions |
+| `eval_helpers.py` | Trust evaluation helpers (canonical profiles, IPTA) |
+| `tex.py` | Collects result PDFs into `latex/filelist.tex` |
+| `patas_module/` | Full PaTAS implementation — see [`patas_module/readme.md`](patas_module/readme.md) |
+| `data/` | Real 5G CSVs (BSinfo.csv, CLstat.csv, ECstat.csv) |
 
-**Standalone evaluation and plot scripts** (require `matplotlib`):
+## Hyperparameters
 
-| File | Purpose |
-|---|---|
-| `eval_chapter.py` | Generates accuracy/trust figures and LaTeX tables for the dissertation chapter |
-| `eval_5g_noise.py` | Noise-robustness grid: Gaussian feature noise × label-flip rates × three PaTAS configs |
-| `calibration_trust_eval.py` | Algorithm 5 — calibration-based trust evaluation (produces `calibration_trust.pdf`) |
-| `latency_eval.py` | NN vs PaTAS inference and training latency benchmark |
-| `noise_utils.py` | Noise-injection helpers and trust-opinion mapping shared by the eval scripts |
-| `plot_effectiveness_hardcoded.py` | Reproduces the effectiveness figure from hardcoded table data |
-| `plot_latency_hardcoded.py` | Reproduces the latency figure from hardcoded table data |
-| `external_bridge.py` | Adapter layer connecting the eval scripts to the `patas_module` implementation |
-| `tex.py` | Collects result PDFs into `latex/filelist.tex` for the dissertation figure bundle |
-| `patas_module/` | Full socket-based PaTAS implementation used by the eval scripts — see [`patas_module/readme.md`](patas_module/readme.md) |
+All shared hyperparameters are in `hyperparams.py`:
 
-## What each experiment reproduces
+| Parameter | Value | Description |
+|---|---|---|
+| `FEATURE_SIGMAS` | [0, 0.1, 0.3, 0.5] | Feature noise levels for the robustness grid |
+| `LABEL_FLIPS` | [0, 0.05, 0.15, 0.30] | Label flip rates for the robustness grid |
+| `COMBINED` | 4 pairs | (σ, p) conditions for the combined-noise study |
+| `N_RUNS` | 5 | Independent noise-draw repetitions (results averaged) |
+| `EPOCHS` | 20 | Training epochs per run |
+| `BATCH` | 64 | Mini-batch size |
+| `LR` | 0.01 | Learning rate |
+| `N_HIDDEN` | 32 | Hidden-layer size |
 
-**Breast Cancer** (§7.8.1 Exp 1, Table 7.2).  30-16-2 MLP, 15 epochs,
-lr 0.2.  Trained under nine X/Y trust combinations (trusted / uncertain /
-distrusted) plus two intermediate scenarios, for ε ∈ {0.01, 0.1}.  Reports
-final trust mass and accuracy.  Clean X+Y → high trust mass; uncertain or
-distrusted Y → trust collapses to ≈ 0; distrusted X → trust collapses
-regardless of Y.
+## Trust-opinion mapping
 
-**MNIST** (§7.8.1 Exp 2, Table 7.3).  Four architectures
-input-{16,32,64,128}-10 trained on uncertain X/Y, plus a fully-trusted bonus
-row on the smallest architecture.  Trust mass grows with hidden size on
-uncertain data, but **training a small architecture on trusted data beats
-training a larger one on uncertain data** by a wide margin.
+Feature noise and label noise are mapped to subjective-logic opinions by
+`noise_utils.py`:
 
-> *Real 28×28 MNIST requires an internet download.  We use sklearn's 8×8
-> `load_digits` as a local proxy.  All trust mechanics are identical; only
-> `n_in` changes from 784 to 64.*
+- **Feature noise** (measurement uncertainty) → uncertainty-dominated opinion:
+  `u = 2σ²/(1+σ²)`, then `b` and `d` split the remaining mass by SNR.
+- **Label noise** (active mislabelling) → disbelief-dominated opinion with
+  fixed residual uncertainty `u = 0.2`:
+  `b = (1−p)(1−u)`, `d = p(1−u)`.
 
-**Poisoned MNIST** (§7.8.1 Exp 3, Tables 7.4-7.5).  Patch + label-flip
-attack (6 ↔ 9) on one third of the training rows.  Trust setup: patch pixels
-distrusted, labels of patched rows distrusted.  **PaTAS-TP gives the clean
-reference class non-zero trust mass while the poisoned class collapses to
-zero**, even though both classes reach similar accuracy on clean test samples.
-The IPTA block flags poisoned-class inference paths as vacuous.
-
-**GTSRB Balancing Bias** (§6.5, Reference [5]).  The Chapter 6 framework
-applied to class balance, with two trust sources:
-- **Method 1 (CUQ)** on the global class-probabilities distribution
-  (Scenario 1: original vs SMOTE-augmented).
-- **Method 2 (BPQ)** on per-contributor entropies (Scenario 2: M = 10 and
-  M = 100 contributors with a growing fraction of imbalanced ones).
-
-> *Real GTSRB requires an internet download; we synthesise equivalent
-> class counts.  The trust mechanics are exact.*
-
-**CIFAR-10H Labeling Bias** (§6.6, Reference [6]).  Per-entry opinions from
-M annotators per image, plus the annotator-level extension.  Reproduces
-Fig. 6.8: full (M ≈ 50) gives b ≈ 0.77, u ≈ 0.04 (evidence saturation);
-cropped to 10 gives b ≈ 0.50, d ≈ 0.33, u ≈ 0.17 (mass redistributed).
-
-> *Real CIFAR-10H requires a 250 MB download; we simulate annotators with
-> three reliability tiers.  The trust mechanics are exact.*
-
-## How the dissertation's theorems are verified
-
-After running the 5G classifier you should observe:
-
-- **Theorem 7.2** — vacuous input ⇒ vacuous output:
-  `Input = vacuous → ω(b=0.000, d=0.000, u=1.000)`
-- **Theorem 7.3** — symmetric inference: trusted inputs give
-  `(b=t, d=0, u=1-t)` and distrusted inputs give the exact mirror
-  `(b=0, d=t, u=1-t)`.
-
-## Implementation notes
-
-Three places where the dissertation leaves room for interpretation are
-documented inline in the code:
-
-1. **Auxiliary update (Step 6 of Alg. 6).**  ⊙ in §7.6 admits two
-   readings: Jøsang's binomial AND or trust discounting.  We use
-   discounting because applying AND every mini-batch compounds distrust
-   unboundedly and contradicts the t = 0.87 result in Table 7.2.
-
-2. **Bias in the Trust Function.**  Def. 7.4 strictly fuses only the
-   weighted-input contributions — bias trust is maintained and updated
-   but is not fused into the per-neuron output opinion.
-
-3. **Class-aware label trust on layer 2.**  When per-row labels are
-   available, the label-trust opinion T_y used in Step 6 of Alg. 6 is
-   aggregated *per output class* — only rows whose true label is c
-   contribute to the T_y of edges feeding output neuron c.  This lets a
-   class-targeted poisoning attack show up as a class-specific drop in
-   parameter trust (cf. Table 7.4).  Pass `y_labels=yb` to
-   `parameter_trust_update` to enable this; if omitted, the batch-wide
-   T_y is used for all edges.
-
-## Choosing the gradient threshold ε
-
-ε controls how NODETRUST (Alg. 6) splits gradients into positive and
-negative evidence.  Per §7.9, ε must track the gradient scale.  The
-default is **ε = learning_rate** (`eps_factor = 1.0`); override per
-experiment with the `eps_factor` argument to `training.train()`.
+Clean conditions (σ = 0 or p = 0) map to the fully-trusted opinion (b=1, d=0, u=0).
