@@ -52,12 +52,12 @@ import numpy as np
 
 plt.rcParams.update({
     "font.family":       "serif",
-    "font.size":         14,
-    "axes.titlesize":    14,
-    "axes.labelsize":    14,
-    "legend.fontsize":   14,
-    "xtick.labelsize":   14,
-    "ytick.labelsize":   14,
+    "font.size":         12,
+    "axes.titlesize":    12,
+    "axes.labelsize":    12,
+    "legend.fontsize":   12,
+    "xtick.labelsize":   12,
+    "ytick.labelsize":   12,
     "axes.spines.top":   False,
     "axes.spines.right": False,
     "figure.dpi":        150,
@@ -72,8 +72,8 @@ _C_PTAS = "#8e44ad"
 
 INF_BATCH_SIZES   = [1, 8, 32, 64, 128, 256, 512, 1024]
 N_INF_REPEATS     = 200      # timing repetitions per batch size (median taken)
-N_BENCH_EPOCHS    = 5        # epochs for training benchmark
-N_TRAIN_TRIALS    = 3        # independent timing trials for training
+N_BENCH_EPOCHS    = 10       # epochs for training benchmark (matches 5G experiment config)
+N_TRAIN_TRIALS    = 5        # independent timing trials for training
 BENCH_PORT_BASE   = 7200     # starting port for benchmark processes
 N_HIDDEN          = 32
 BATCH             = 64
@@ -469,8 +469,8 @@ def _plot_inference(ax_top: plt.Axes, ax_bot: plt.Axes, inf_results: dict):
 
     ax_top.plot(xs, nn_ms,   color=_C_NN,   marker="o", lw=2, ms=6, label="NN only")
     ax_top.plot(xs, ptas_ms, color=_C_PTAS, marker="s", lw=2, ms=6, label="NN + PaTAS")
-    ax_top.set_xscale("log", base=2)
-    ax_top.set_yscale("log")
+    # ax_top.set_xscale("log", base=2)
+    # ax_top.set_yscale("log")
     ax_top.set_ylabel("Latency (ms, median)")
     ax_top.set_title("Inference latency vs batch size", fontsize=10)
     ax_top.legend()
@@ -518,7 +518,7 @@ def _plot_training(ax_top: plt.Axes, ax_bot: plt.Axes, train_results: dict):
     ax_top.set_xticks(x)
     ax_top.set_xticklabels(cond_names, fontsize=9)
     ax_top.set_ylabel(f"Total wall-clock ({N_BENCH_EPOCHS} epochs, s)")
-    ax_top.set_title("Training latency — in-process, clean condition", fontsize=10)
+    ax_top.set_title("Training latency — clean condition", fontsize=10)
     ax_top.legend()
     ax_top.grid(axis="y", linestyle=":", alpha=0.5, zorder=0)
 
@@ -657,24 +657,17 @@ def latency_analysis(ds, output_dir: str):
     nn_pkl = os.path.join(output_dir, "data",
                           "fn_0.00_ptas-cal-fb_r0", "nn_weights.pkl")
 
-    # ---- Part A: Inference ----
+    # ---- Inference ----
     print("\n[A] Inference latency benchmark ...")
     inf_results = run_inference_benchmark(ds.X_test.astype(np.float32), nn_pkl)
 
-    # ---- Part B: Training (in-process, no socket overhead) ----
-    print("\n[B] Training latency benchmark (in-process) ...")
-    train_results = run_training_inprocess_benchmark(ds)
-
     # ---- Plot ----
-    fig, axes = plt.subplots(2, 2, figsize=(13, 7),
-                             gridspec_kw={"height_ratios": [2, 1]})
-    _plot_inference(axes[0, 0], axes[1, 0], inf_results)
-    _plot_training( axes[0, 1], axes[1, 1], train_results)
+    fig, axes = plt.subplots(2, 1, figsize=(7, 7),
+                             gridspec_kw={"height_ratios": [2, 1]},
+                             sharex=True)
+    _plot_inference(axes[0], axes[1], inf_results)
 
-    fig.suptitle(
-        f"PaTAS latency overhead — inference (left) and training in-process (right, {N_BENCH_EPOCHS} epochs)",
-        fontsize=12,
-    )
+    fig.suptitle("PaTAS latency overhead — inference", fontsize=12)
     fig.tight_layout()
     for ext in ("pdf", "png"):
         path = os.path.join(plots_dir, f"latency.{ext}")
@@ -683,7 +676,7 @@ def latency_analysis(ds, output_dir: str):
     print(f"\n  Saved {os.path.join(plots_dir, 'latency.pdf')}")
 
     # ---- Tables ----
-    _write_tables(inf_results, train_results, tables_dir)
+    _write_tables(inf_results, {}, tables_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -724,26 +717,15 @@ if __name__ == "__main__":
     nn_pkl = os.path.join(args.output_dir, "data",
                           "fn_0.00_ptas-cal-fb_r0", "nn_weights.pkl")
 
-    inf_results   = {}
-    train_results = {}
-
-    if not args.training_only:
-        print("\n[A] Inference latency benchmark ...")
-        inf_results = run_inference_benchmark(ds.X_test.astype(np.float32), nn_pkl)
-
-    if not args.inference_only:
-        print("\n[B] Training latency benchmark (in-process) ...")
-        train_results = run_training_inprocess_benchmark(ds)
+    print("\n[A] Inference latency benchmark ...")
+    inf_results = run_inference_benchmark(ds.X_test.astype(np.float32), nn_pkl)
 
     # ---- Plot ----
-    fig, axes = plt.subplots(2, 2, figsize=(13, 7),
-                             gridspec_kw={"height_ratios": [2, 1]})
-    _plot_inference(axes[0, 0], axes[1, 0], inf_results)
-    _plot_training( axes[0, 1], axes[1, 1], train_results)
-    fig.suptitle(
-        f"PaTAS latency overhead — inference (left) and training in-process (right, {N_BENCH_EPOCHS} epochs)",
-        fontsize=12,
-    )
+    fig, axes = plt.subplots(2, 1, figsize=(7, 7),
+                             gridspec_kw={"height_ratios": [2, 1]},
+                             sharex=True)
+    _plot_inference(axes[0], axes[1], inf_results)
+    fig.suptitle("PaTAS latency overhead — inference", fontsize=12)
     fig.tight_layout()
     for ext in ("pdf", "png"):
         p = os.path.join(plots_dir, f"latency.{ext}")
@@ -751,5 +733,5 @@ if __name__ == "__main__":
     plt.close(fig)
     print(f"\n  Saved {os.path.join(plots_dir, 'latency.pdf')}")
 
-    _write_tables(inf_results, train_results, tables_dir)
+    _write_tables(inf_results, {}, tables_dir)
     print("Done.")
