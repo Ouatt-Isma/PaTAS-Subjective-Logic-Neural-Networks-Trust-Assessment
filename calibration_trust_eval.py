@@ -409,29 +409,43 @@ def plot_calibration_coverage(
     axis_title: str,
     n_clusters: int = 10,
 ) -> None:
-    """Coverage-accuracy curves: calibration π = b + u/2 vs. NN softmax."""
+    """Coverage-accuracy curves and ROC curves: calibration π = b + u/2 vs. NN softmax."""
+    try:
+        from sklearn.metrics import roc_curve as _sk_roc, auc as _sk_auc
+        _has_sklearn = True
+    except ImportError:
+        _has_sklearn = False
+
     valid = [(lbl, pkl) for lbl, pkl in conditions if os.path.exists(pkl)]
     if not valid:
         return
 
     n_cond = len(valid)
     ncols  = min(n_cond, 2)
-    nrows  = (n_cond + ncols - 1) // ncols
+    nrows_per_block = 2  # row 0: coverage-accuracy; row 1: ROC
+    nblocks = (n_cond + ncols - 1) // ncols
+    nrows   = nblocks * nrows_per_block
+
     fig, axes = plt.subplots(nrows, ncols,
                              figsize=(5.5 * ncols, 4.5 * nrows),
                              squeeze=False)
 
     n_test = len(y_test)
     for idx, (lbl, pkl) in enumerate(valid):
-        ax = axes[idx // ncols][idx % ncols]
+        block  = idx // ncols
+        col    = idx % ncols
+        ax_cov = axes[block * nrows_per_block][col]
+        ax_roc = axes[block * nrows_per_block + 1][col]
 
         y_prob = _nn_softmax(pkl, X_test)
         if y_prob is None:
-            ax.set_visible(False)
+            ax_cov.set_visible(False)
+            ax_roc.set_visible(False)
             continue
 
         nn_pred = y_prob.argmax(axis=1)
         correct = (nn_pred == y_test)
+        correct_bin = correct.astype(int)
 
         n_cls = y_prob.shape[1]
         df = pd.DataFrame(y_prob,
@@ -441,29 +455,56 @@ def plot_calibration_coverage(
         res    = get_per_prediction_trust(df, lookup, n_clusters=n_clusters)
         pi_cal = res["belief"] + 0.5 * res["uncertainty"]
 
-        for key, scores in [("nn", y_prob.max(axis=1)), ("cal_pi", pi_cal)]:
+        score_map = [("nn", y_prob.max(axis=1)), ("cal_pi", pi_cal)]
+
+        # ---- coverage-accuracy ----
+        for key, scores in score_map:
             covs, accs = _coverage_sweep(scores, correct, n_test)
             valid_mask = ~np.isnan(accs)
             if not valid_mask.any():
                 continue
-            ax.plot(covs[valid_mask], accs[valid_mask],
-                    color=_CAL_COLORS[key], lw=2, label=_CAL_LABELS[key])
+            ax_cov.plot(covs[valid_mask], accs[valid_mask],
+                        color=_CAL_COLORS[key], lw=2, label=_CAL_LABELS[key])
             if not np.isnan(accs[0]):
-                ax.scatter([covs[0]], [accs[0]],
-                           color=_CAL_COLORS[key], s=35, zorder=5)
+                ax_cov.scatter([covs[0]], [accs[0]],
+                               color=_CAL_COLORS[key], s=35, zorder=5)
 
-        ax.set_title(lbl, fontsize=9)
-        ax.set_xlabel("Coverage (%)")
-        ax.set_ylabel("Accuracy on covered (%)")
-        ax.set_xlim(-2, 105)
-        ax.legend(fontsize=7, loc="lower left")
-        ax.grid(linestyle=":", alpha=0.4)
+        ax_cov.set_title(lbl, fontsize=9)
+        ax_cov.set_xlabel("Coverage (%)")
+        ax_cov.set_ylabel("Accuracy on covered (%)")
+        ax_cov.set_xlim(-2, 105)
+        ax_cov.legend(fontsize=7, loc="lower left")
+        ax_cov.grid(linestyle=":", alpha=0.4)
 
-    for idx in range(n_cond, nrows * ncols):
-        axes[idx // ncols][idx % ncols].set_visible(False)
+        # ---- ROC curves ----
+        if _has_sklearn:
+            for key, scores in score_map:
+                if not np.isfinite(scores).any():
+                    continue
+                _fpr, _tpr, _ = _sk_roc(correct_bin, scores)
+                _auc_val = _sk_auc(_fpr, _tpr)
+                ax_roc.plot(_fpr, _tpr,
+                            color=_CAL_COLORS[key], lw=2,
+                            label=f"{_CAL_LABELS[key]}  AUC={_auc_val:.3f}")
+            ax_roc.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5)
+            ax_roc.set_xlabel("False Positive Rate")
+            ax_roc.set_ylabel("True Positive Rate")
+            ax_roc.set_title(f"ROC — {lbl}", fontsize=9)
+            ax_roc.legend(fontsize=7, loc="lower right")
+            ax_roc.grid(linestyle=":", alpha=0.4)
+            ax_roc.set_xlim(-0.02, 1.02)
+            ax_roc.set_ylim(-0.02, 1.02)
+        else:
+            ax_roc.set_visible(False)
+
+    for idx in range(n_cond, nblocks * ncols):
+        block = idx // ncols
+        col   = idx % ncols
+        axes[block * nrows_per_block][col].set_visible(False)
+        axes[block * nrows_per_block + 1][col].set_visible(False)
 
     fig.suptitle(
-        f"Calibration-based Coverage-Accuracy — {axis_title}\n"
+        f"Calibration-based Coverage-Accuracy & ROC — {axis_title}\n"
         r"($\pi = b + u/2$ threshold vs.\ NN softmax)",
         fontsize=11,
     )

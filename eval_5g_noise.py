@@ -1460,6 +1460,12 @@ def plot_coverage_accuracy(ds, n_classes: int, output_dir: str):
 
     os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
 
+    try:
+        from sklearn.metrics import roc_curve as _sk_roc, auc as _sk_auc
+        _has_sklearn = True
+    except ImportError:
+        _has_sklearn = False
+
     for ax_key, ax_title, conditions in axes_spec:
         panels = []
         for omega_p, nn_p, panel_title in conditions:
@@ -1471,36 +1477,108 @@ def plot_coverage_accuracy(ds, n_classes: int, output_dir: str):
             continue
 
         ncols = 4
-        nrows = 1
+        nrows = 2  # row 0: coverage-accuracy; row 1: ROC curves
 
         fig, axes_arr = plt.subplots(nrows, ncols,
                                      figsize=(5.5 * ncols, 4.5 * nrows),
                                      squeeze=False)
 
         for pi, (panel_title, curves) in enumerate(panels):
-            ax = axes_arr[pi // ncols][pi % ncols]
+            ax_cov = axes_arr[0][pi % ncols]
+            ax_roc = axes_arr[1][pi % ncols]
+
+            # ---- row 0: coverage-accuracy ----
             for src in _THR_SOURCES:
                 covs, accs = curves[src]
                 valid = ~np.isnan(accs)
                 if not valid.any():
                     continue
-                ax.plot(covs[valid], accs[valid],
-                        color=_THR_COLORS[src], lw=2, ls=_THR_LINESTYLES[src],
-                        # marker=_THR_MARKERS[src], markersize=2.5,
-                        label=_THR_LABELS[src])
-                # dot at 100 % coverage (threshold = 0)
-                ax.scatter([covs[0]], [accs[0] if not np.isnan(accs[0]) else np.nan],
-                           color=_THR_COLORS[src], s=35, zorder=5)
+                ax_cov.plot(covs[valid], accs[valid],
+                            color=_THR_COLORS[src], lw=2, ls=_THR_LINESTYLES[src],
+                            label=_THR_LABELS[src])
+                ax_cov.scatter([covs[0]], [accs[0] if not np.isnan(accs[0]) else np.nan],
+                               color=_THR_COLORS[src], s=35, zorder=5)
 
-            ax.set_title(panel_title, fontsize=16)
-            ax.set_xlabel("Coverage (%)")
-            ax.set_ylabel("Accuracy on covered (%)")
-            ax.set_xlim(-2, 105)
-            ax.legend(fontsize=16, loc="lower left")
-            ax.grid(linestyle=":", alpha=0.4)
+            ax_cov.set_title(panel_title, fontsize=16)
+            ax_cov.set_xlabel("Coverage (%)")
+            ax_cov.set_ylabel("Accuracy on covered (%)")
+            ax_cov.set_xlim(-2, 105)
+            ax_cov.legend(fontsize=16, loc="lower left")
+            ax_cov.grid(linestyle=":", alpha=0.4)
 
-        for pi in range(len(panels), nrows * ncols):
-            axes_arr[pi // ncols][pi % ncols].set_visible(False)
+            # ---- row 1: ROC curves ----
+            if _has_sklearn and "nn" in curves and hasattr(curves["nn"], "__len__"):
+                # Recover binary correct-vs-incorrect labels from the sweep data.
+                # We re-derive them from the raw scores stored in the closure.
+                # Since _load_curves closes over nn_score and s, recompute here.
+                _omega_p, _nn_p, _ = conditions[pi]
+                raw = _load_curves(_omega_p, _nn_p)
+                if raw is not None:
+                    # Re-run _load_curves gives same object; extract stored arrays.
+                    pass
+
+            # ROC requires (y_true_binary, score) per sample — we cannot recover
+            # them from the already-swept (covs, accs) pairs alone.  Re-derive
+            # from the raw model outputs by calling _load_curves again and
+            # capturing per-sample data via a thin wrapper.
+            _omega_p, _nn_p, _ = conditions[pi]
+            if _has_sklearn and os.path.exists(_omega_p) and os.path.exists(_nn_p):
+                import pickle as _pk
+                with open(_nn_p, "rb") as _fh:
+                    _w = _pk.load(_fh)
+                from patas_module.NN.primaryNN import relu as _relu, softmax as _softmax_fn
+                _a1 = _relu(_X_noisy_cv @ _w["W1"] + _w["b1"])
+                _a2 = _softmax_fn(_a1 @ _w["W2"] + _w["b2"])
+                _nn_pred = _a2.argmax(axis=1)
+                _correct_bin = (_nn_pred == y_test).astype(int)
+                _nn_score_roc = _a2[idx, _nn_pred]
+
+                with open(_omega_p, "rb") as _fh:
+                    _omega_data = _pk.load(_fh)
+                from patas_module.concrete.TensorTO import TensorArrayTO as _TATO
+                from patas_module.NN.PTAStemplate import PTAS as _PTASClass
+                _omega_thetas = [_TATO(ow.astype(np.float32)) for ow in _omega_data]
+                from patas_module.concrete.TrustOpinion import TrustOpinion as _TO
+                _ptas = _PTASClass(
+                    omega_thetas=_omega_thetas,
+                    operator_mapping=None, nn_interface=None,
+                    trust_assessment_func=None,
+                    structure=[ds.X_test.shape[1], N_HIDDEN, n_classes],
+                    use_tensor=True,
+                )
+                _Ty2 = _ptas.apply_feedforward(_TATO(_tens_cv), tmp=False)
+                _b = _Ty2.value[idx, _nn_pred, 0]
+                _d = _Ty2.value[idx, _nn_pred, 1]
+                _u = _Ty2.value[idx, _nn_pred, 2]
+                _b_n, _d_n, _u_n = bdu_with_weights(_b, _d, _u, _nn_score_roc)
+                _pi_roc = _b_n + _u_n / 2.0
+
+                _roc_scores = {"nn": _nn_score_roc, "comb_pi": _pi_roc}
+                for src in _THR_SOURCES:
+                    if src not in _roc_scores:
+                        continue
+                    _sc = _roc_scores[src]
+                    if not np.isfinite(_sc).any():
+                        continue
+                    _fpr, _tpr, _ = _sk_roc(_correct_bin, _sc)
+                    _auc_val = _sk_auc(_fpr, _tpr)
+                    ax_roc.plot(_fpr, _tpr,
+                                color=_THR_COLORS[src], lw=2, ls=_THR_LINESTYLES[src],
+                                label=f"{_THR_LABELS[src]}  AUC={_auc_val:.3f}")
+                ax_roc.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5)
+                ax_roc.set_xlabel("False Positive Rate")
+                ax_roc.set_ylabel("True Positive Rate")
+                ax_roc.set_title(f"ROC — {panel_title}", fontsize=12)
+                ax_roc.legend(fontsize=11, loc="lower right")
+                ax_roc.grid(linestyle=":", alpha=0.4)
+                ax_roc.set_xlim(-0.02, 1.02)
+                ax_roc.set_ylim(-0.02, 1.02)
+            else:
+                ax_roc.set_visible(False)
+
+        for pi in range(len(panels), ncols):
+            axes_arr[0][pi].set_visible(False)
+            axes_arr[1][pi].set_visible(False)
 
         fig.suptitle(ax_title, fontsize=16)
         fig.tight_layout()
