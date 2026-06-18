@@ -50,6 +50,7 @@ from data_loader import load_5g_dataset, make_synthetic_5g
 from noise_utils import (
     add_feature_noise,
     add_label_noise,
+    add_feature_noise_per_sample,
     feature_noise_to_trust,
     label_noise_to_trust,
     trust_components,
@@ -772,7 +773,7 @@ def table_combined(all_results: dict, output_dir: str):
 # PTAS effectiveness analysis
 # ---------------------------------------------------------------------------
 
-def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str):
+def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str, per_sample: str = "uniform"):
     """Assess whether PTAS output trust distinguishes NN correct vs. wrong predictions.
 
     Metric: projected probability π = b + u/K in the NN's predicted class,
@@ -900,17 +901,44 @@ def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str):
                                "comb_bu", "comb_bdu", "comb_pi")}
     fn_tex_rows: list[list] = []
 
+    # Build trust LUT for vectorised per-sample trust tensor construction.
+    # sigma_i values lie in [0, 1] so 1001 steps give 0.001 resolution.
+    _fn_sg_lut = np.linspace(0.0, 1.0, 1001)
+    _fn_b_lut  = np.array([feature_noise_to_trust(float(s)).t for s in _fn_sg_lut], dtype=np.float32)
+    _fn_d_lut  = np.array([feature_noise_to_trust(float(s)).d for s in _fn_sg_lut], dtype=np.float32)
+    _fn_u_lut  = np.array([feature_noise_to_trust(float(s)).u for s in _fn_sg_lut], dtype=np.float32)
+
+    def _per_sample_tens(sigma_arr: np.ndarray, n_dim: int) -> np.ndarray:
+        """Return (n, dim, 3) float32 trust tensor from per-sample sigma array."""
+        si = (np.asarray(sigma_arr, dtype=np.float32) * 1000).astype(int).clip(0, 1000)
+        t = np.empty((len(sigma_arr), n_dim, 3), dtype=np.float32)
+        t[:, :, 0] = _fn_b_lut[si][:, None]
+        t[:, :, 1] = _fn_d_lut[si][:, None]
+        t[:, :, 2] = _fn_u_lut[si][:, None]
+        return t
+
     for sigma in FEATURE_SIGMAS:
         base    = os.path.join(output_dir, "data")
         omega_p = os.path.join(base, f"fn_{sigma:.2f}_ptas-cal-fb_r0", "omega_thetas.pkl")
         nn_p    = os.path.join(base, f"fn_{sigma:.2f}_ptas-cal-fb_r0", "nn_weights.pkl")
-        nn_preds, a2 = _load_nn(nn_p)
+        if per_sample == "per_sample":
+            X_noisy_fn, sigma_arr_fn = add_feature_noise_per_sample(
+                ds.X_test, sigma, rng=np.random.default_rng(42)
+            )
+            fn_trust = _per_sample_tens(sigma_arr_fn, dim)
+            nn_preds, a2 = _load_nn(nn_p, X_eval=X_noisy_fn)
+        elif per_sample == "fully_trusted":
+            fn_trust = TrustOpinion(1.0, 0.0, 0.0)
+            nn_preds, a2 = _load_nn(nn_p)
+        else:
+            fn_trust = feature_noise_to_trust(sigma)
+            nn_preds, a2 = _load_nn(nn_p)
         if nn_preds is None:
             continue
         correct   = (nn_preds == y_test_int)
         n_correct = int(correct.sum())
         n_wrong   = int((~correct).sum())
-        opinions = _compute_all_opinions(omega_p, a2, feature_noise_to_trust(sigma), nn_preds)
+        opinions = _compute_all_opinions(omega_p, a2, fn_trust, nn_preds)
         if opinions is None:
             continue
         for src in ["agg"]:
@@ -986,13 +1014,24 @@ def ptas_effectiveness_analysis(ds, n_classes: int, output_dir: str):
                                "omega_thetas.pkl")
         nn_p    = os.path.join(base, f"comb_{sigma:.2f}_{flip:.2f}_ptas-cal-fb_r0",
                                "nn_weights.pkl")
-        nn_preds, a2 = _load_nn(nn_p)
+        if per_sample == "per_sample":
+            X_noisy_cb, sigma_arr_cb = add_feature_noise_per_sample(
+                ds.X_test, sigma, rng=np.random.default_rng(42)
+            )
+            cb_trust = _per_sample_tens(sigma_arr_cb, dim)
+            nn_preds, a2 = _load_nn(nn_p, X_eval=X_noisy_cb)
+        elif per_sample == "fully_trusted":
+            cb_trust = TrustOpinion(1.0, 0.0, 0.0)
+            nn_preds, a2 = _load_nn(nn_p)
+        else:
+            cb_trust = feature_noise_to_trust(sigma)
+            nn_preds, a2 = _load_nn(nn_p)
         if nn_preds is None:
             continue
         correct   = (nn_preds == y_test_int)
         n_correct = int(correct.sum())
         n_wrong   = int((~correct).sum())
-        opinions = _compute_all_opinions(omega_p, a2, feature_noise_to_trust(sigma), nn_preds)
+        opinions = _compute_all_opinions(omega_p, a2, cb_trust, nn_preds)
         if opinions is None:
             continue
         for src in ["agg"]:
@@ -1830,7 +1869,7 @@ def eval_mixed_noise(ds, n_classes: int, output_dir: str,
 # Generate all plots and tables
 # ---------------------------------------------------------------------------
 
-def generate_outputs(all_results: dict, output_dir: str, ds=None, n_classes: int = 3, run_latency: bool = False):
+def generate_outputs(all_results: dict, output_dir: str, ds=None, n_classes: int = 3, run_latency: bool = False, per_sample: str = "uniform"):
     os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
     os.makedirs(os.path.join(output_dir, "tables"), exist_ok=True)
 
@@ -1851,7 +1890,7 @@ def generate_outputs(all_results: dict, output_dir: str, ds=None, n_classes: int
     if ds is not None:
         ds_copy = copy.deepcopy(ds)
         print("\nGenerating PTAS effectiveness analysis ...")
-        ptas_effectiveness_analysis(ds, n_classes, output_dir)
+        ptas_effectiveness_analysis(ds, n_classes, output_dir, per_sample=per_sample)
 
         print("\nGenerating coverage-accuracy curves ...")
         plot_coverage_accuracy(ds, n_classes, output_dir)
@@ -2294,7 +2333,17 @@ if __name__ == "__main__":
                          "'(b + u/2) >= tau'")
     ap.add_argument("--latency", action="store_true",
                     help="Run latency benchmark (inference + training overhead).")
+    _trust_grp = ap.add_mutually_exclusive_group()
+    _trust_grp.add_argument("--per-sample", action="store_true",
+                    help="Effectiveness analysis: noise each test input with σ_i~Uniform(0,σ) "
+                         "and assign it the matching trust opinion feature_noise_to_trust(σ_i). "
+                         "Mutually exclusive with --trust.")
+    _trust_grp.add_argument("--uniform", action="store_true",
+                    help="Effectiveness analysis: use a uniform trust distribution (b=0.5, d=0.5, u=0.5) "
+                         "for all test inputs, regardless of noise level. "
+                         "Mutually exclusive with --per-sample.")
     args = ap.parse_args()
+    trust_mode = "per_sample" if args.per_sample else ("uniform" if args.uniform else "fully_trusted")
 
     if args.plots_only or args.threshold is not None or args.latency:
         # Load dataset (needed for threshold eval and effectiveness plots)
@@ -2315,7 +2364,7 @@ if __name__ == "__main__":
             if not all_results:
                 print("No cached results found. Run without --plots-only first.")
             else:
-                generate_outputs(all_results, args.output, ds=_ds, n_classes=_nc, run_latency=args.latency)
+                generate_outputs(all_results, args.output, ds=_ds, n_classes=_nc, run_latency=args.latency, per_sample=trust_mode)
 
         if args.threshold is not None:
             if _ds is None:
@@ -2326,6 +2375,6 @@ if __name__ == "__main__":
     else:
         all_results, ds, n_classes = run_all(args.data_dir, args.output,
                                              force=args.force)
-        generate_outputs(all_results, args.output, ds=ds, n_classes=n_classes, run_latency=args.latency)
+        generate_outputs(all_results, args.output, ds=ds, n_classes=n_classes, run_latency=args.latency, per_sample=trust_mode)
 
     print("\nDone.")

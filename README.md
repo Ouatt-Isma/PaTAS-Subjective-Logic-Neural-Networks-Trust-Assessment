@@ -68,10 +68,21 @@ Trust opinions are mapped from noise parameters to subjective-logic triples
 noise grows disbelief (d).
 
 ```bash
-python eval_5g_noise.py data/              # run all + plot
-python eval_5g_noise.py data/ --force      # re-run even if cached
-python eval_5g_noise.py data/ --plots-only # skip training, plot from cache
+python eval_5g_noise.py data/                            # run all + plot
+python eval_5g_noise.py data/ --force                    # re-run even if cached
+python eval_5g_noise.py data/ --plots-only               # skip training, plot from cache
+python eval_5g_noise.py data/ --plots-only --per-sample  # per-sample trust in effectiveness plot
+python eval_5g_noise.py data/ --plots-only --trust       # fully-trusted opinion in effectiveness plot
 ```
+
+The following mutually exclusive flags control how trust opinions are assigned in the PaTAS
+effectiveness analysis (`patas_effectiveness_agg.pdf`) only:
+
+| Flag | Trust assigned to each test input |
+|---|---|
+| *(default)* | Uniform `feature_noise_to_trust(σ)` — same opinion for every sample |
+| `--per-sample` | Per-sample `feature_noise_to_trust(σ_i)` where σ_i ~ Uniform(0, σ); input is also noised accordingly |
+| `--trust` | Fully-trusted opinion `(b=1, d=0, u=0)` for every sample |
 
 **Outputs** (saved under `results_noise/` by default):
 

@@ -456,10 +456,10 @@ def run_training_inprocess_benchmark(ds) -> dict:
 # Plotting
 # ---------------------------------------------------------------------------
 
-def _plot_inference(ax_top: plt.Axes, ax_bot: plt.Axes, inf_results: dict):
+def _plot_inference(ax: plt.Axes, inf_results: dict):
     if not inf_results:
-        ax_top.text(0.5, 0.5, "No data", ha="center", va="center",
-                    transform=ax_top.transAxes)
+        ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                transform=ax.transAxes)
         return
 
     xs      = sorted(inf_results.keys())
@@ -467,26 +467,26 @@ def _plot_inference(ax_top: plt.Axes, ax_bot: plt.Axes, inf_results: dict):
     ptas_ms = [inf_results[b][1] for b in xs]
     ratio   = [p / max(n, 1e-9) for n, p in zip(nn_ms, ptas_ms)]
 
-    ax_top.plot(xs, nn_ms,   color=_C_NN,   marker="o", lw=2, ms=6, label="NN only")
-    ax_top.plot(xs, ptas_ms, color=_C_PTAS, marker="s", lw=2, ms=6, label="NN + PaTAS")
-    # ax_top.set_xscale("log", base=2)
-    # ax_top.set_yscale("log")
-    ax_top.set_ylabel("Latency (ms, median)")
-    ax_top.set_title("Inference latency vs batch size", fontsize=10)
-    ax_top.legend()
-    ax_top.grid(True, which="both", linestyle=":", alpha=0.4)
+    l1, = ax.plot(xs, nn_ms,   color=_C_NN,   marker="o", lw=2, ms=6, label="NN only")
+    l2, = ax.plot(xs, ptas_ms, color=_C_PTAS, marker="s", lw=2, ms=6, label="NN + PaTAS")
+    ax.set_xscale("log", base=2)
+    ax.set_xlabel("Batch size")
+    ax.set_ylabel("Latency (ms, median)")
+    ax.set_xticks(xs)
+    ax.set_xticklabels([str(b) for b in xs], fontsize=9)
+    ax.grid(True, which="both", linestyle=":", alpha=0.4)
 
-    ax_bot.plot(xs, ratio, color=_C_PTAS, marker="^", lw=2, ms=6)
-    ax_bot.axhline(1.0, color="black", lw=0.8, linestyle="--")
-    ax_bot.set_xscale("log", base=2)
-    ax_bot.set_xlabel("Batch size")
-    ax_bot.set_ylabel("Overhead ratio\n(PTAS / NN)")
-    ax_bot.set_xticks(xs)
-    ax_bot.set_xticklabels([str(b) for b in xs], fontsize=8)
-    ax_bot.grid(True, which="both", linestyle=":", alpha=0.4)
+    ax2 = ax.twinx()
+    l3, = ax2.plot(xs, ratio, color=_C_PTAS, marker="^", lw=1.5, ms=5,
+                   linestyle="--", alpha=0.6, label="Overhead ratio")
+    ax2.axhline(1.0, color="black", lw=0.8, linestyle=":")
+    ax2.set_ylabel("Overhead ratio (PaTAS / NN)", color=_C_PTAS)
+    ax2.tick_params(axis="y", labelcolor=_C_PTAS)
     for x, r in zip(xs, ratio):
-        ax_bot.text(x, r + 0.05, f"{r:.1f}×", ha="center", va="bottom",
-                    fontsize=7, color=_C_PTAS)
+        ax2.text(x, r + 0.05, f"{r:.1f}×", ha="center", va="bottom",
+                 fontsize=7, color=_C_PTAS)
+
+    ax.legend(handles=[l1, l2, l3], loc="upper left", fontsize=9)
 
 
 def _plot_training(ax_top: plt.Axes, ax_bot: plt.Axes, train_results: dict):
@@ -662,10 +662,8 @@ def latency_analysis(ds, output_dir: str):
     inf_results = run_inference_benchmark(ds.X_test.astype(np.float32), nn_pkl)
 
     # ---- Plot ----
-    fig, axes = plt.subplots(2, 1, figsize=(7, 7),
-                             gridspec_kw={"height_ratios": [2, 1]},
-                             sharex=True)
-    _plot_inference(axes[0], axes[1], inf_results)
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    _plot_inference(ax, inf_results)
 
     fig.suptitle("PaTAS latency overhead — inference", fontsize=12)
     fig.tight_layout()
@@ -721,10 +719,8 @@ if __name__ == "__main__":
     inf_results = run_inference_benchmark(ds.X_test.astype(np.float32), nn_pkl)
 
     # ---- Plot ----
-    fig, axes = plt.subplots(2, 1, figsize=(7, 7),
-                             gridspec_kw={"height_ratios": [2, 1]},
-                             sharex=True)
-    _plot_inference(axes[0], axes[1], inf_results)
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    _plot_inference(ax, inf_results)
     fig.suptitle("PaTAS latency overhead — inference", fontsize=12)
     fig.tight_layout()
     for ext in ("pdf", "png"):
