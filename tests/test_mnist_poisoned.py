@@ -719,7 +719,7 @@ def plot_trust_2a_vs_2c(
                 )
 
     ax.set_ylabel("Trust mass")
-    ax.set_title(f"IPTA trust mass — Table 2a vs 2c  ({patch_size}×{patch_size} patch)")
+    ax.set_title(f"IPTA trust mass ({patch_size}×{patch_size} patch)")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=15, ha="right", fontsize=16)
     ax.set_ylim(0, 1.2)
