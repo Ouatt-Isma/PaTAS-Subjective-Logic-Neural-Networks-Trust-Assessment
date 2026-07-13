@@ -236,7 +236,7 @@ def _ptas_worker(
                 "trust_mass":   float(PTASClass.aggregation(a_trust)[0]),
                 "trust_for_3":  float(a_trust.value[0, 3, 0]),
                 "trust_for_6":  float(a_trust.value[0, 6, 0]),
-                "omega_arrays": [ot.value.copy() for ot in ptas.omega_thetas],
+                "omega_arrays": [ot.to_numpy().copy() for ot in ptas.omega_thetas],
             })
         except Exception as exc:
             import traceback
@@ -442,6 +442,9 @@ def compute_ipta_results(
     patch_size:      int,
     structure:       list[int],
     input_dim:       int = 784,
+    img_size:        int = 28,
+    pois_class:      int = 6,
+    ctrl_class:      int = 3,
 ) -> tuple[dict[str, tuple[float, float, float]], ...]:
     """
     Reconstruct a PTAS from omega_arrays and compute IPTA outputs for all rows.
@@ -475,15 +478,16 @@ def compute_ipta_results(
     Tx_patch = ArrayTO(TrustOpinion.fill((1, input_dim), method="trust"))
     for i in range(patch_size):
         for j in range(patch_size):
-            Tx_patch.value[0][28 * i + j] = TrustOpinion.dtrust()
+            Tx_patch.value[0][img_size * i + j] = TrustOpinion.dtrust()
 
     def _ipta_all(path, tx, cls_idx, probs):
+        from concrete.TensorTO import to_numpy
         ipta_fn = ptas_recon.GenIPTA(path)
         output  = ipta_fn(tx)               # TensorArrayTO (1, n_out, 3)
-        v       = output.value[0]           # (n_out, 3)
+        v       = to_numpy(output.value)[0]  # (n_out, 3)
         v_cls   = v[cls_idx]
         cls_op  = (float(v_cls[0]), float(v_cls[1]), float(v_cls[2]))
-        agg_v   = PTASClass.aggregation(output)   # (3,) numpy array
+        agg_v   = PTASClass.aggregation(output)   # (3,)
         agg_op  = (float(agg_v[0]), float(agg_v[1]), float(agg_v[2]))
         if probs is not None:
             p    = np.array(probs, dtype=np.float64).flatten()
@@ -498,15 +502,15 @@ def compute_ipta_results(
     weighted:  dict[str, tuple[float, float, float]] = {}
 
     rows = [
-        ("clean_3",         inference_paths["clean_3"], Tx_trusted, 3, inference_paths.get("probs_clean_3")),
-        ("clean_6",         inference_paths["clean_6"], Tx_trusted, 6, inference_paths.get("probs_clean_6")),
-        ("pois_6_trusted",  inference_paths["pois_6"],  Tx_trusted, 6, inference_paths.get("probs_pois_6")),
-        ("pois_6_distrust", inference_paths["pois_6"],  Tx_patch,   6, inference_paths.get("probs_pois_6")),
+        ("clean_3",         inference_paths["clean_3"], Tx_trusted, ctrl_class, inference_paths.get("probs_clean_3")),
+        ("clean_6",         inference_paths["clean_6"], Tx_trusted, pois_class, inference_paths.get("probs_clean_6")),
+        ("pois_6_trusted",  inference_paths["pois_6"],  Tx_trusted, pois_class, inference_paths.get("probs_pois_6")),
+        ("pois_6_distrust", inference_paths["pois_6"],  Tx_patch,   pois_class, inference_paths.get("probs_pois_6")),
     ]
     if "pois_3" in inference_paths:
         rows += [
-            ("pois_3_trusted",  inference_paths["pois_3"], Tx_trusted, 3, inference_paths.get("probs_pois_3")),
-            ("pois_3_distrust", inference_paths["pois_3"], Tx_patch,   3, inference_paths.get("probs_pois_3")),
+            ("pois_3_trusted",  inference_paths["pois_3"], Tx_trusted, ctrl_class, inference_paths.get("probs_pois_3")),
+            ("pois_3_distrust", inference_paths["pois_3"], Tx_patch,   ctrl_class, inference_paths.get("probs_pois_3")),
         ]
 
     for key, path, tx, cls_idx, probs in rows:
