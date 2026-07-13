@@ -1,0 +1,318 @@
+"""
+CIFAR-10 ResNet PTAS integration test (conv-PTAS prototype).
+
+Architecture (cifar10_resnet_specs, base_channels=16): a three-stage CIFAR
+ResNet in the spirit of the classic ResNet-for-CIFAR family —
+
+    conv 3→16 (pool) → resblock 16 → conv 16→32 (pool) → resblock 32
+      → conv 32→64 (pool) → resblock 64 → fc 1024→10
+
+7 conv layers + fc = 10 PaTAS opinion matrices, ~155k parameters.
+
+PaTAS mirrors every weight layer (conv layers through their flattened-kernel
+opinion matrices, skip connections as averaging fusion; see NN/convPTAS.py).
+Exact under spatially uniform input trust; IPTA is not available for conv.
+
+Notes
+-----
+* Expect ~60-70% test accuracy at 20-30 epochs on CPU without augmentation;
+  reaching the classic ResNet-20 ~91% needs a GPU torch build, weight decay,
+  LR schedule and augmentation — the architecture here is the faithful,
+  PaTAS-assessable counterpart, sized for CPU experiments.
+* First run downloads CIFAR-10 (~170 MB) via torchvision and caches it to
+  data/cifar10_flat.npz.
+
+Run standalone:
+    python tests/test_cifar10_resnet.py                    # trust/trust, 20 epochs
+    python tests/test_cifar10_resnet.py --epochs 2         # quick smoke-test
+    python tests/test_cifar10_resnet.py --xtrust vacuous --ytrust vacuous
+    python tests/test_cifar10_resnet.py --base-channels 32 # wider net
+    python tests/test_cifar10_resnet.py --no-ptas          # NN baseline only
+
+Run with pytest (skipped by default; use -m integration):
+    pytest tests/test_cifar10_resnet.py -m integration -s
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import argparse
+import multiprocessing
+from typing import Any
+
+# ── Path bootstrap ────────────────────────────────────────────────────────────
+_v2_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_patas_dir = os.path.join(_v2_dir, "patas_module")
+_tests_dir = os.path.dirname(os.path.abspath(__file__))
+for _p in (_v2_dir, _patas_dir, _tests_dir):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+import patas_module  # noqa: F401 — triggers path bootstrap
+
+try:
+    import pytest
+except ImportError:
+    class _FakeMark:  # type: ignore[no-redef]
+        @staticmethod
+        def integration(fn): return fn
+    class _FakePytest:  # type: ignore[no-redef]
+        mark = _FakeMark()
+    pytest = _FakePytest()  # type: ignore[assignment]
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+_BASE_PORT      = 5131
+_DEFAULT_EPS    = 0.05
+_DEFAULT_EPOCHS = 20
+_IMG_SIZE       = 32
+_IN_CHANNELS    = 3
+_NUM_CLASSES    = 10
+_LR             = 0.05
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Subprocess workers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ptas_worker(result_queue, ready_event, port, x_trust, y_trust,
+                 epsilon_low, base_channels) -> None:
+    """PTASConv server subprocess mirroring the CIFAR-10 ResNet."""
+    try:
+        from NN.convPTAS import PTASConv
+        from NN.convNN import cifar10_resnet_specs
+        from NN.PTAStemplate import PTAS as PTASClass
+        from PTASTemp.ptasInterface import PTASInterface
+        from concrete.TensorTO import TensorArrayTO, fill as tfill
+        from main import build_trust_generator
+
+        specs = cifar10_resnet_specs(img_size=_IMG_SIZE, in_channels=_IN_CHANNELS,
+                                     num_classes=_NUM_CLASSES,
+                                     base_channels=base_channels)
+        out_dim = specs[-1]["out"]
+        x_gen = build_trust_generator(x_trust)
+        y_gen = build_trust_generator(y_trust)
+
+        def trust_assessment(x, dim):
+            n = len(x)
+            if dim == out_dim:
+                return y_gen(n, dim)
+            return x_gen(n, dim)
+
+        ptas = PTASConv(
+            layer_specs=specs,
+            nn_interface=PTASInterface(port),
+            trust_assessment_func=trust_assessment,
+            epsilon_low=epsilon_low,
+        )
+        ptas.run_chunk(ready_event=ready_event)
+
+        input_dim = _IN_CHANNELS * _IMG_SIZE * _IMG_SIZE
+        results = {}
+        for label, method in (("trust_mass", "trust"),
+                              ("vacuous_mass", "vacuous"),
+                              ("distrust_mass", "distrust")):
+            a = ptas.apply_feedforward(TensorArrayTO(tfill((1, input_dim), method=method)))
+            agg = PTASClass.aggregation(a)
+            # trust component for trusted input, distrust component for distrusted
+            results[label] = float(agg[0] if label != "distrust_mass" else agg[1])
+        result_queue.put(results)
+    except Exception as exc:
+        import traceback
+        result_queue.put({"trust_mass": float("nan"), "error": str(exc),
+                          "tb": traceback.format_exc()})
+
+
+def _client_worker(result_queue, port, epochs, x_trust, y_trust,
+                   base_channels, ptas=True) -> None:
+    """CIFAR-10 ResNet client subprocess."""
+    try:
+        from NN.convNN import ConvNet, cifar10_resnet_specs
+        from NN.datasets import load_data
+        from main import TRUST_TO_DATASET
+
+        x_how = TRUST_TO_DATASET.get(x_trust, "clean")
+        y_how = TRUST_TO_DATASET.get(y_trust, "clean")
+        X_train, X_test, y_train, y_test, _ = load_data("cifar10", x_how, y_how)
+
+        specs = cifar10_resnet_specs(img_size=_IMG_SIZE, in_channels=_IN_CHANNELS,
+                                     num_classes=_NUM_CLASSES,
+                                     base_channels=base_channels)
+        net = ConvNet(img_size=_IMG_SIZE, in_channels=_IN_CHANNELS,
+                      num_classes=_NUM_CLASSES, specs=specs,
+                      ptas=ptas, operation=True, port=port)
+        hist = net.train(X_train, y_train, X_test, y_test,
+                         epochs=epochs, batch_size=128,
+                         lr_scheduler=lambda e: _LR)
+        net.end()
+        result_queue.put({
+            "train_acc": hist["train_acc"][-1] if hist["train_acc"] else float("nan"),
+            "test_acc":  hist["test_acc"][-1] if hist["test_acc"] else float("nan"),
+        })
+    except Exception as exc:
+        import traceback
+        result_queue.put({"train_acc": float("nan"), "test_acc": float("nan"),
+                          "error": str(exc), "tb": traceback.format_exc()})
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scenario runners
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_cifar_resnet_scenario(epochs: int = _DEFAULT_EPOCHS,
+                              port: int = _BASE_PORT,
+                              x_trust: str = "trust", y_trust: str = "trust",
+                              epsilon_low: float = _DEFAULT_EPS,
+                              base_channels: int = 16) -> dict[str, Any]:
+    """Two-process PTASConv + CIFAR-ResNet run; returns trust masses + accuracies."""
+    ptas_q: "multiprocessing.Queue[dict]" = multiprocessing.Queue()
+    client_q: "multiprocessing.Queue[dict]" = multiprocessing.Queue()
+    ready_event = multiprocessing.Event()
+
+    ptas_proc = multiprocessing.Process(
+        target=_ptas_worker,
+        args=(ptas_q, ready_event, port, x_trust, y_trust, epsilon_low, base_channels))
+    ptas_proc.start()
+    ready_event.wait(timeout=60)
+
+    client_proc = multiprocessing.Process(
+        target=_client_worker,
+        args=(client_q, port, epochs, x_trust, y_trust, base_channels))
+    client_proc.start()
+
+    _QUEUE_TIMEOUT = 14400   # CIFAR CPU runs are slow; generous upper bound
+    try:
+        ptas_res = ptas_q.get(timeout=_QUEUE_TIMEOUT)
+    except Exception:
+        ptas_res = {}
+    try:
+        client_res = client_q.get(timeout=_QUEUE_TIMEOUT)
+    except Exception:
+        client_res = {}
+
+    client_proc.join(timeout=60)
+    ptas_proc.join(timeout=60)
+    for proc in (client_proc, ptas_proc):
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=10)
+
+    for res, tag in ((ptas_res, "PTAS"), (client_res, "CLIENT")):
+        if "error" in res:
+            print(f"  [{tag} ERROR] {res['error']}")
+            print(res.get("tb", ""))
+
+    return {
+        "arch":          f"cifar-resnet-{base_channels}",
+        "x_trust":       x_trust,
+        "y_trust":       y_trust,
+        "trust_mass":    ptas_res.get("trust_mass", float("nan")),
+        "vacuous_mass":  ptas_res.get("vacuous_mass", float("nan")),
+        "distrust_mass": ptas_res.get("distrust_mass", float("nan")),
+        "train_acc":     client_res.get("train_acc", float("nan")),
+        "test_acc":      client_res.get("test_acc", float("nan")),
+    }
+
+
+def run_baseline_no_ptas(epochs: int = _DEFAULT_EPOCHS,
+                         base_channels: int = 16) -> dict[str, Any]:
+    """CIFAR-10 ResNet accuracy baseline without PTAS (single subprocess)."""
+    client_q: "multiprocessing.Queue[dict]" = multiprocessing.Queue()
+    client_proc = multiprocessing.Process(
+        target=_client_worker,
+        args=(client_q, 0, epochs, "trust", "trust", base_channels, False))
+    client_proc.start()
+    try:
+        client_res = client_q.get(timeout=14400)
+    except Exception:
+        client_res = {}
+    client_proc.join(timeout=60)
+    if client_proc.is_alive():
+        client_proc.terminate()
+        client_proc.join(timeout=10)
+    if "error" in client_res:
+        print(f"  [CLIENT ERROR] {client_res['error']}")
+        print(client_res.get("tb", ""))
+    return {
+        "arch":       f"cifar-resnet-{base_channels}",
+        "train_acc":  client_res.get("train_acc", float("nan")),
+        "test_acc":   client_res.get("test_acc", float("nan")),
+        "trust_mass": float("nan"),
+    }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pytest integration tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.integration
+def test_cifar10_resnet_trust():
+    """CIFAR-10 ResNet with conv-PTAS, trust/trust (2 epochs)."""
+    result = run_cifar_resnet_scenario(epochs=2, port=5135)
+    assert result["train_acc"] > 0.25, f"Low train acc: {result['train_acc']}"
+    assert 0.0 <= result["trust_mass"] <= 1.0, f"Trust mass OOB: {result['trust_mass']}"
+
+
+@pytest.mark.integration
+def test_cifar10_resnet_baseline():
+    """CIFAR-10 ResNet baseline without PTAS (2 epochs)."""
+    result = run_baseline_no_ptas(epochs=2)
+    assert result["train_acc"] > 0.25, f"Low train acc: {result['train_acc']}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Standalone CLI
+# ─────────────────────────────────────────────────────────────────────────────
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="CIFAR-10 ResNet PTAS test (conv-PTAS prototype).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--xtrust", default="trust",
+                   help="X trust: trust | distrust | vacuous | t,d,u")
+    p.add_argument("--ytrust", default="trust",
+                   help="Y trust: trust | distrust | vacuous | t,d,u")
+    p.add_argument("--epochs", type=int, default=_DEFAULT_EPOCHS)
+    p.add_argument("--epsilon-low", type=float, default=_DEFAULT_EPS)
+    p.add_argument("--port", type=int, default=_BASE_PORT)
+    p.add_argument("--base-channels", type=int, default=16,
+                   help="Stage-1 width; stages use 1×/2×/4× this (default 16)")
+    p.add_argument("--no-ptas", action="store_true",
+                   help="Accuracy baseline without PTAS")
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    print(f"\n{'='*64}")
+    print(f"  CIFAR-10 RESNET TEST  |  x={args.xtrust}  y={args.ytrust}")
+    print(f"  base_channels={args.base_channels}  epochs={args.epochs}  "
+          f"ε={args.epsilon_low}  port={args.port}  ptas={not args.no_ptas}")
+    print(f"{'='*64}\n")
+
+    if args.no_ptas:
+        result = run_baseline_no_ptas(epochs=args.epochs,
+                                      base_channels=args.base_channels)
+    else:
+        result = run_cifar_resnet_scenario(
+            epochs=args.epochs, port=args.port,
+            x_trust=args.xtrust, y_trust=args.ytrust,
+            epsilon_low=args.epsilon_low,
+            base_channels=args.base_channels,
+        )
+
+    print(f"\n{'='*64}")
+    print("  Results")
+    print(f"{'='*64}")
+    print(f"  Architecture  : {result['arch']}")
+    print(f"  Train Acc     : {result['train_acc']*100:.2f}%")
+    print(f"  Test Acc      : {result['test_acc']*100:.2f}%")
+    if not args.no_ptas:
+        print(f"  Trust mass (trusted input)      : {result['trust_mass']:.4f}")
+        print(f"  Uncertainty (vacuous input)     : {1.0 - result['vacuous_mass']:.4f}"
+              f"  (trust component {result['vacuous_mass']:.4f})")
+        print(f"  Distrust mass (distrusted input): {result['distrust_mass']:.4f}")
+    print(f"{'='*64}\n")
+    print("=== CIFAR-10 ResNet test complete ===\n")
+
+
+if __name__ == "__main__":
+    main()

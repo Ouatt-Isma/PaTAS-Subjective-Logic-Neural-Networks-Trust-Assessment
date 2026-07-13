@@ -294,6 +294,10 @@ def run_scenario(cfg: TestCaseConfig) -> dict[str, Any]:
     client_proc.join(timeout=60)
     ptas_proc.join(timeout=60)
 
+    for res, tag in ((ptas_result, "PTAS"), (client_result, "CLIENT")):
+        if "error" in res:
+            print(f"  [{tag} ERROR] {res['error']}")
+
     return {
         "hidden_dims": cfg.hidden_dims,
         "x_trust":    cfg.x_trust,
