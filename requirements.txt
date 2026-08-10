@@ -1,0 +1,16 @@
+numpy
+pandas
+scikit-learn
+matplotlib
+scipy
+seaborn
+tqdm
+torch
+torchvision
+Pillow
+pytest
+
+# Optional — only needed for legacy/alternate data-loading paths:
+# tensorflow>=2.10    # sl_calibration/ Keras-based MNIST loader
+# opencv-python       # NN.datasets.load_gtsrb_from_kaggle (legacy Kaggle loader)
+# kagglehub           # NN.datasets.load_gtsrb_from_kaggle (legacy Kaggle loader)
