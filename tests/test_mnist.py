@@ -142,14 +142,18 @@ def make_mnist_cfg(
 # Trust-mass helper
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_trust_mass(ptas_obj: Any, input_dim: int) -> float:
+def compute_trust_mass(ptas_obj: Any, input_dim: int) -> tuple[float, float]:
     """
     Final Trust Mass = trust component of the aggregated feedforward output
     when passing a fully-trusted input through the trained PTAS network.
 
-    Concretely: PTAS.aggregation(ptas.apply_feedforward(trusted_input))[0]
+    Returns (raw, depth_normalized):
+        raw  = PTAS.aggregation(ptas.apply_feedforward(trusted_input))[0]
+        norm = ptas.depth_normalized_aggregation(...)[0] — the committed mass
+               (b+d) taken to the power 1/L (L = number of weight layers) with
+               the b:d ratio preserved, so scores are comparable across depths.
 
-    This is identical to what ptas_evaluation prints as:
+    The raw value is identical to what ptas_evaluation prints as:
         "Apply Feed Forward on fully Trusted Input"
         "Aggregated Value:  [t, d, u]"   ← we return t.
     """
@@ -161,7 +165,8 @@ def compute_trust_mass(ptas_obj: Any, input_dim: int) -> float:
         trusted_input = ArrayTO(TrustOpinion.fill((1, input_dim), method="trust"))
         a = ptas_obj.apply_feedforward(trusted_input)
         agg = PTASClass.aggregation(a)   # shape (3,): [t, d, u]
-        return float(agg[0])             # trust component
+        norm = ptas_obj.depth_normalized_aggregation(a)
+        return float(agg[0]), float(norm[0])
     except Exception:
         # Fallback: weighted mean trust of weight tensors
         total_t, total_n = 0.0, 0
@@ -170,7 +175,8 @@ def compute_trust_mass(ptas_obj: Any, input_dim: int) -> float:
             if isinstance(v, np.ndarray) and v.ndim == 3:
                 total_t += float(v[..., 0].sum())
                 total_n += v[..., 0].size
-        return total_t / total_n if total_n > 0 else float("nan")
+        raw = total_t / total_n if total_n > 0 else float("nan")
+        return raw, float("nan")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Metrics file reader
@@ -206,10 +212,14 @@ def _ptas_worker(cfg: TestCaseConfig, result_queue: "multiprocessing.Queue[dict]
     """
     try:
         ptas = start_ptas(cfg, ready_event=ready_event)
-        trust_mass = compute_trust_mass(ptas, cfg.input_dim) if ptas is not None else float("nan")
-        result_queue.put({"trust_mass": trust_mass})
+        if ptas is not None:
+            trust_mass, trust_norm = compute_trust_mass(ptas, cfg.input_dim)
+        else:
+            trust_mass, trust_norm = float("nan"), float("nan")
+        result_queue.put({"trust_mass": trust_mass, "trust_norm": trust_norm})
     except Exception as exc:
-        result_queue.put({"trust_mass": float("nan"), "error": str(exc)})
+        result_queue.put({"trust_mass": float("nan"), "trust_norm": float("nan"),
+                          "error": str(exc)})
 
 
 def _client_worker(cfg: TestCaseConfig, result_queue: "multiprocessing.Queue[dict]") -> None:
@@ -303,6 +313,7 @@ def run_scenario(cfg: TestCaseConfig) -> dict[str, Any]:
         "x_trust":    cfg.x_trust,
         "y_trust":    cfg.y_trust,
         "trust_mass": ptas_result.get("trust_mass", float("nan")),
+        "trust_norm": ptas_result.get("trust_norm", float("nan")),
         "train_acc":  client_result.get("train_acc", float("nan")),
         "test_acc":   client_result.get("test_acc", float("nan")),
     }
@@ -341,9 +352,11 @@ def run_all_scenarios(
 
         result = run_scenario(cfg)
         tm = result["trust_mass"]
+        tn = result["trust_norm"]
         tr = result["train_acc"]
         te = result["test_acc"]
-        print(f"    trust_mass={tm:.4f}  train={tr*100:.2f}%  test={te*100:.2f}%")
+        print(f"    trust_mass={tm:.4f}  trust_norm={tn:.4f}  "
+              f"train={tr*100:.2f}%  test={te*100:.2f}%")
         results.append(result)
         time.sleep(2)
 
@@ -374,6 +387,7 @@ def run_scenario_no_ptas(cfg: TestCaseConfig) -> dict[str, Any]:
         "x_trust":    cfg.x_trust,
         "y_trust":    cfg.y_trust,
         "trust_mass": float("nan"),   # no PTAS in this mode
+        "trust_norm": float("nan"),
         "train_acc":  client_result.get("train_acc", float("nan")),
         "test_acc":   client_result.get("test_acc", float("nan")),
     }
@@ -513,8 +527,8 @@ def print_results_table(results: list[dict[str, Any]]) -> None:
             return "?"
         return "-".join(str(h) for h in dims)
 
-    headers = ["Architecture", "x_trust",  "y_trust",  "Trust Mass", "Train Acc", "Test Acc"]
-    col_w   = [14,              10,          10,          12,           10,          10]
+    headers = ["Architecture", "x_trust",  "y_trust",  "Trust Mass", "Norm Trust", "Train Acc", "Test Acc"]
+    col_w   = [14,              10,          10,          12,           12,           10,          10]
     parts   = [f"{{:<{w}}}" for w in col_w[:3]] + [f"{{:>{w}}}" for w in col_w[3:]]
     row_fmt = "  ".join(parts)
     sep     = "-" * (sum(col_w) + 2 * (len(col_w) - 1))
@@ -524,6 +538,8 @@ def print_results_table(results: list[dict[str, Any]]) -> None:
     print("  MNIST PTAS — Architecture Sweep Results")
     print("  Trust Mass = aggregated output trust on fully-trusted input")
     print("  (= 'Apply Feed Forward on trusted input → Aggregated Value[0]')")
+    print("  Norm Trust = depth-normalized: (b+d)^(1/L), b:d ratio preserved")
+    print("  (comparable across depths — 'trust retention per layer')")
     print("=" * len(sep))
     print()
     print(sep)
@@ -536,6 +552,7 @@ def print_results_table(results: list[dict[str, Any]]) -> None:
             r.get("x_trust", "?"),
             r.get("y_trust", "?"),
             _f4(r.get("trust_mass", float("nan"))),
+            _f4(r.get("trust_norm", float("nan"))),
             _pct(r.get("train_acc",  float("nan"))),
             _pct(r.get("test_acc",   float("nan"))),
         ]
@@ -745,6 +762,8 @@ def main() -> None:
         print(f"  y_trust      : {result['y_trust']}")
         print(f"  Trust Mass   : {result['trust_mass']:.4f}  "
               f"(aggregated output trust on fully-trusted input)")
+        print(f"  Norm Trust   : {result['trust_norm']:.4f}  "
+              f"(depth-normalized: (b+d)^(1/L), comparable across depths)")
         print(f"  Train Acc    : {result['train_acc']*100:.2f}%")
         print(f"  Test Acc     : {result['test_acc']*100:.2f}%")
         print(f"{'='*64}\n")

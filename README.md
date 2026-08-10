@@ -190,6 +190,70 @@ python plot_latency_hardcoded.py         # → latency_hardcoded.pdf/.png
 
 ---
 
+### 6. UQ baseline comparison — `run_uq_comparison.py`
+
+Quantitative comparison of selective-prediction filters on MNIST / GTSRB /
+CIFAR-10: **PaTAS filter** (trust-discounted confidence — softmax confidence
+SL-discounted by the per-sample IPTA path trust; the raw path trust is kept
+as a diagnostic in `scores.npz`), **Softmax filter**,
+**MC Dropout** (Gal & Ghahramani 2016) and **EDL** (Sensoy et al. 2018;
+implemented in torch — the pypi `evidential-deep-learning` package is
+TF/Keras and regression-only).  DeepTrust (Cheng et al.) has no public code;
+its paper-reported values go into `DEEPTRUST_PAPER` in the script and are
+rendered into the summary table.
+
+```bash
+python run_uq_comparison.py --dataset mnist --train-missing        # clean + label-noise (p=0.3), full run
+python run_uq_comparison.py --dataset mnist --arch 1000            # reuse existing caches
+python run_uq_comparison.py --dataset gtsrb --train-missing
+python run_uq_comparison.py --dataset cifar10 --train-missing      # class-trust discount (no conv IPTA)
+python run_uq_comparison.py --dataset mnist --label-noise 0.15 0.3 0.5 --train-missing   # multiple flip rates
+python run_uq_comparison.py --dataset mnist --label-noise --train-missing                # clean-trained only
+```
+
+Every method is evaluated on **clean test data and under test-time feature
+noise** (`--test-noise`, default p ∈ {0.3, 0.6}; same Bernoulli-uniform
+corruption as the training-noise model, labels stay clean).  This full
+battery is repeated for a second set of models **trained under label noise**
+(`--label-noise`, default flip rate 0.3 — clean features, labels flipped via
+`NN.datasets.noised_label` / `y_trust='vacuous'`), in addition to the
+default clean-trained models — the case where PaTAS's model-side trust
+should diverge from softmax (which stays confident regardless of training
+data quality). Pass `--label-noise` with no values to disable it.
+
+Outputs per dataset **and per training condition** under
+`results/UQ_Compare_<ds>_<arch>[_labelnoise<p>]/`: `roc_<cond>.pdf`,
+`coverage_accuracy_<cond>.pdf`, `metrics_vs_noise.pdf`, `ece_table.tex`
+(Acc / AUROC / AURC / ECE, one block per test condition), `summary.json`,
+`scores.npz`.  Reuses the scenario caches, now keyed by `x_trust`/`y_trust`
+(`trust/trust` = clean, `trust/vacuous` = label noise):
+`results/NN_Train_*_<x_trust>_<y_trust>_*/nn_model.pkl`,
+`results/PTAS_Eval_*_<x_trust>_<y_trust>_*/omega_arrays.pkl`;
+MC-Dropout/EDL models are cached under `results/UQ_Train_*[_labelnoise<p>]`.
+**Note:** caches are not epoch-stamped — delete the relevant results
+directory when changing `--epochs`.
+
+### 7. Ablation studies — `ablation_epsilon.py`, `ablation_fusion.py`
+
+```bash
+python ablation_epsilon.py --dataset mnist --epochs 20   # ε ∈ {0.001 … 1.0} sweep
+python ablation_fusion.py  --dataset mnist --epochs 20   # ABF vs CBF vs WBF revision fusion
+```
+
+Both ablations evaluate the PaTAS filter (trust-discounted confidence) on
+clean **and** feature-noised test data (`--test-noise`, default p = 0.3).
+The ε ablation retrains PaTAS per ε (cached per-ε directories), reports the
+aggregated (t, d, u) saturation regimes and selects ε* by the **minimum mean
+ECE** of the trust-discounted confidence over both test conditions (small ε
+→ collapsed trust → under-confident; large ε → saturated trust → reduces to
+the over-confident softmax).  The fusion ablation retrains PaTAS with the trust-revision
+fusion operator swapped (`fuse_method` in `TestCaseConfig` / `PTAS`:
+`average` | `cumulative` | `weighted`; non-default variants are cached with a
+`_fuse_<method>` suffix).  Outputs under `results/Ablation_*` (figure +
+LaTeX table + JSON).
+
+---
+
 ## File map
 
 | File | Role |
