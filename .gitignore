@@ -1,41 +1,9 @@
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-*.egg-info/
-dist/
-build/
-.eggs/
-*.egg
-
-# Virtual environments
-.venv/
-venv/
-env/
-
-# NumPy / data caches
-*.npy
+﻿data/
+results/
+results_ok ok/
+*.pkl
+*.zip
+*.tar.gz
 *.npz
-
-# Jupyter
-.ipynb_checkpoints/
-
-# IDE
-.vscode/
-.idea/
-*.suo
-*.user
-
-# Logs and temp
-*.log
-*.tmp
-*.bak
-*.nnn
-
-# Generated LaTeX bundle (reproducible via tex.py)
-latex/
-
-# OS
-.DS_Store
-Thumbs.db
+__pycache__/
+*.pyc
