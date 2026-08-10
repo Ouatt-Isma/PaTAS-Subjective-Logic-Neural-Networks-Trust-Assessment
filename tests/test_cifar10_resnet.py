@@ -71,19 +71,40 @@ _NUM_CLASSES    = 10
 _LR             = 0.05
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Result caching — same naming scheme as start_ptas / start_client so that
+# run_uq_comparison.py (and future scripts) can reuse the artefacts.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cifar_paths(x_trust: str, y_trust: str, epsilon_low: float) -> tuple[str, str]:
+    """(PTAS_Eval dir, NN_Train dir) for a CIFAR-10 ResNet-lite scenario."""
+    ptas_dir = (
+        f"results/PTAS_Eval_cifar10_resnet-lite_{x_trust}_{y_trust}"
+        f"_eps_{epsilon_low}_PathSize_None"
+    )
+    nn_dir = f"results/NN_Train_cifar10_resnet-lite_{x_trust}_{y_trust}_PathSize_None"
+    return ptas_dir, nn_dir
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Subprocess workers
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _ptas_worker(result_queue, ready_event, port, x_trust, y_trust,
                  epsilon_low, base_channels) -> None:
-    """PTASConv server subprocess mirroring the CIFAR-10 ResNet."""
+    """PTASConv server subprocess mirroring the CIFAR-10 ResNet.
+
+    Mirrors start_ptas: loads omega_arrays.pkl when cached (skipping training)
+    and always writes the evaluation files (evaluation_log.txt, at/av/ad.pkl,
+    omega_arrays.pkl) into the PTAS_Eval results directory.
+    """
     try:
+        import pickle
+
         from NN.convPTAS import PTASConv
-        from NN.convNN import cifar10_resnet_specs
+        from NN.convNN import cifar10_resnet_specs, spec_omega_shapes
         from NN.PTAStemplate import PTAS as PTASClass
         from PTASTemp.ptasInterface import PTASInterface
-        from concrete.TensorTO import TensorArrayTO, fill as tfill
-        from main import build_trust_generator
+        from concrete.TensorTO import TensorArrayTO, fill as tfill, as_tensor
+        from main import build_trust_generator, ptas_evaluation
 
         specs = cifar10_resnet_specs(img_size=_IMG_SIZE, in_channels=_IN_CHANNELS,
                                      num_classes=_NUM_CLASSES,
@@ -104,9 +125,37 @@ def _ptas_worker(result_queue, ready_event, port, x_trust, y_trust,
             trust_assessment_func=trust_assessment,
             epsilon_low=epsilon_low,
         )
-        ptas.run_chunk(ready_event=ready_event)
+
+        datapath, _ = _cifar_paths(x_trust, y_trust, epsilon_low)
+        omega_path = os.path.join(datapath, "omega_arrays.pkl")
+        expected_shapes = [(r, c, 3) for r, c in spec_omega_shapes(specs)]
+
+        loaded = False
+        if os.path.exists(omega_path):
+            with open(omega_path, "rb") as fh:
+                omega_arrays = pickle.load(fh)
+            shapes_ok = (
+                len(omega_arrays) == len(expected_shapes)
+                and all(tuple(arr.shape) == exp
+                        for arr, exp in zip(omega_arrays, expected_shapes))
+            )
+            if shapes_ok:
+                print(f"[PTAS] Loading saved weights from {omega_path} — skipping training.")
+                for i, arr in enumerate(omega_arrays):
+                    ptas.omega_thetas[i] = TensorArrayTO(as_tensor(arr, device=ptas.device))
+                ready_event.set()
+                loaded = True
+            else:
+                print("[PTAS] omega_arrays.pkl shape mismatch — "
+                      "deleting stale file and retraining.")
+                os.remove(omega_path)
+
+        if not loaded:
+            ptas.run_chunk(ready_event=ready_event)
 
         input_dim = _IN_CHANNELS * _IMG_SIZE * _IMG_SIZE
+        # Writes evaluation_log.txt, at/av/ad.pkl and omega_arrays.pkl
+        ptas_evaluation(ptas, input_dim, datapath=datapath)
         results = {}
         for label, method in (("trust_mass", "trust"),
                               ("vacuous_mass", "vacuous"),
@@ -114,40 +163,85 @@ def _ptas_worker(result_queue, ready_event, port, x_trust, y_trust,
             a = ptas.apply_feedforward(TensorArrayTO(tfill((1, input_dim), method=method)))
             agg = PTASClass.aggregation(a)
             # trust component for trusted input, distrust component for distrusted
-            results[label] = float(agg[0] if label != "distrust_mass" else agg[1])
+            comp = 1 if label == "distrust_mass" else 0
+            results[label] = float(agg[comp])
+            if label != "vacuous_mass":
+                # depth-normalized counterpart: (b+d)^(1/L), b:d ratio preserved.
+                # The vacuous probe has no committed mass, so no norm for it.
+                norm = ptas.depth_normalized_aggregation(a)
+                results[label.replace("_mass", "_norm")] = float(norm[comp])
         result_queue.put(results)
     except Exception as exc:
         import traceback
-        result_queue.put({"trust_mass": float("nan"), "error": str(exc),
-                          "tb": traceback.format_exc()})
+        result_queue.put({"trust_mass": float("nan"), "trust_norm": float("nan"),
+                          "error": str(exc), "tb": traceback.format_exc()})
 
 
 def _client_worker(result_queue, port, epochs, x_trust, y_trust,
-                   base_channels, ptas=True) -> None:
-    """CIFAR-10 ResNet client subprocess."""
+                   base_channels, ptas=True, epsilon_low=_DEFAULT_EPS,
+                   noise_level=None) -> None:
+    """CIFAR-10 ResNet client subprocess.
+
+    Mirrors start_client: caches nn_model.pkl + metrics.txt in the NN_Train
+    results directory.  When the PTAS omegas are already cached the server
+    never binds a socket, so PTAS streaming is disabled; when only the model
+    is cached, training is replayed to feed the gradient stream to PTAS.
+    """
     try:
         from NN.convNN import ConvNet, cifar10_resnet_specs
         from NN.datasets import load_data
+        from NN.utils import writedict
         from main import TRUST_TO_DATASET
+
+        ptas_dir, datapath = _cifar_paths(x_trust, y_trust, epsilon_low)
+        os.makedirs(datapath, exist_ok=True)
+        nn_model_path = os.path.join(datapath, "nn_model.pkl")
+        metrics_path = os.path.join(datapath, "metrics.txt")
+        # Require metrics.txt alongside nn_model.pkl (see start_client).
+        model_cached = os.path.exists(nn_model_path) and os.path.exists(metrics_path)
+        ptas_omega_cached = os.path.exists(os.path.join(ptas_dir, "omega_arrays.pkl"))
 
         x_how = TRUST_TO_DATASET.get(x_trust, "clean")
         y_how = TRUST_TO_DATASET.get(y_trust, "clean")
-        X_train, X_test, y_train, y_test, _ = load_data("cifar10", x_how, y_how)
+        _load_kwargs = {} if noise_level is None else {"noise_level": noise_level}
+        X_train, X_test, y_train, y_test, _ = load_data(
+            "cifar10", x_how, y_how, **_load_kwargs)
 
         specs = cifar10_resnet_specs(img_size=_IMG_SIZE, in_channels=_IN_CHANNELS,
                                      num_classes=_NUM_CLASSES,
                                      base_channels=base_channels)
         net = ConvNet(img_size=_IMG_SIZE, in_channels=_IN_CHANNELS,
                       num_classes=_NUM_CLASSES, specs=specs,
-                      ptas=ptas, operation=True, port=port)
-        hist = net.train(X_train, y_train, X_test, y_test,
-                         epochs=epochs, batch_size=128,
-                         lr_scheduler=lambda e: _LR)
-        net.end()
-        result_queue.put({
-            "train_acc": hist["train_acc"][-1] if hist["train_acc"] else float("nan"),
-            "test_acc":  hist["test_acc"][-1] if hist["test_acc"] else float("nan"),
-        })
+                      ptas=ptas and not ptas_omega_cached,
+                      operation=True, port=port)
+
+        if model_cached:
+            print(f"[NN] Saved model found — loading from {nn_model_path}, skipping training.")
+            net.load_model(nn_model_path)
+            if ptas and not ptas_omega_cached:
+                # Replay training to feed the gradient stream to PTAS
+                net.train(X_train, y_train, X_test, y_test,
+                          epochs=epochs, batch_size=128,
+                          lr_scheduler=lambda e: _LR)
+            net.end()
+            m = {}
+            with open(metrics_path, encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("Train:"):
+                        m["train_acc"] = float(line.split(":", 1)[1])
+                    elif line.startswith("Test:"):
+                        m["test_acc"] = float(line.split(":", 1)[1])
+            result_queue.put(m)
+        else:
+            hist = net.train(X_train, y_train, X_test, y_test,
+                             epochs=epochs, batch_size=128,
+                             lr_scheduler=lambda e: _LR)
+            net.end()
+            train_acc = hist["train_acc"][-1] if hist["train_acc"] else float("nan")
+            test_acc = hist["test_acc"][-1] if hist["test_acc"] else float("nan")
+            net.save_model(nn_model_path)
+            writedict({"Train": train_acc, "Test": test_acc}, metrics_path)
+            result_queue.put({"train_acc": train_acc, "test_acc": test_acc})
     except Exception as exc:
         import traceback
         result_queue.put({"train_acc": float("nan"), "test_acc": float("nan"),
@@ -161,7 +255,8 @@ def run_cifar_resnet_scenario(epochs: int = _DEFAULT_EPOCHS,
                               port: int = _BASE_PORT,
                               x_trust: str = "trust", y_trust: str = "trust",
                               epsilon_low: float = _DEFAULT_EPS,
-                              base_channels: int = 16) -> dict[str, Any]:
+                              base_channels: int = 16,
+                              noise_level: float | None = None) -> dict[str, Any]:
     """Two-process PTASConv + CIFAR-ResNet run; returns trust masses + accuracies."""
     ptas_q: "multiprocessing.Queue[dict]" = multiprocessing.Queue()
     client_q: "multiprocessing.Queue[dict]" = multiprocessing.Queue()
@@ -175,7 +270,8 @@ def run_cifar_resnet_scenario(epochs: int = _DEFAULT_EPOCHS,
 
     client_proc = multiprocessing.Process(
         target=_client_worker,
-        args=(client_q, port, epochs, x_trust, y_trust, base_channels))
+        args=(client_q, port, epochs, x_trust, y_trust, base_channels,
+              True, epsilon_low, noise_level))
     client_proc.start()
 
     _QUEUE_TIMEOUT = 14400   # CIFAR CPU runs are slow; generous upper bound
@@ -205,8 +301,10 @@ def run_cifar_resnet_scenario(epochs: int = _DEFAULT_EPOCHS,
         "x_trust":       x_trust,
         "y_trust":       y_trust,
         "trust_mass":    ptas_res.get("trust_mass", float("nan")),
+        "trust_norm":    ptas_res.get("trust_norm", float("nan")),
         "vacuous_mass":  ptas_res.get("vacuous_mass", float("nan")),
         "distrust_mass": ptas_res.get("distrust_mass", float("nan")),
+        "distrust_norm": ptas_res.get("distrust_norm", float("nan")),
         "train_acc":     client_res.get("train_acc", float("nan")),
         "test_acc":      client_res.get("test_acc", float("nan")),
     }
@@ -236,6 +334,7 @@ def run_baseline_no_ptas(epochs: int = _DEFAULT_EPOCHS,
         "train_acc":  client_res.get("train_acc", float("nan")),
         "test_acc":   client_res.get("test_acc", float("nan")),
         "trust_mass": float("nan"),
+        "trust_norm": float("nan"),
     }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -307,9 +406,12 @@ def main() -> None:
     print(f"  Test Acc      : {result['test_acc']*100:.2f}%")
     if not args.no_ptas:
         print(f"  Trust mass (trusted input)      : {result['trust_mass']:.4f}")
+        print(f"  Norm trust (depth-normalized)   : {result['trust_norm']:.4f}"
+              f"  ((b+d)^(1/L), comparable across depths)")
         print(f"  Uncertainty (vacuous input)     : {1.0 - result['vacuous_mass']:.4f}"
               f"  (trust component {result['vacuous_mass']:.4f})")
         print(f"  Distrust mass (distrusted input): {result['distrust_mass']:.4f}")
+        print(f"  Norm distrust (depth-normalized): {result['distrust_norm']:.4f}")
     print(f"{'='*64}\n")
     print("=== CIFAR-10 ResNet test complete ===\n")
 
