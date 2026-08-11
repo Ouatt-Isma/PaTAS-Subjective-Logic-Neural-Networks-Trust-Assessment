@@ -357,7 +357,14 @@ def ensure_patas_cache(dataset: str, arch: tuple, eps: float, epochs: int,
         fuse_method=fuse_method, noise_level=noise_level,
     )
     run_scenario(cfg)
-    return os.path.exists(omega_path)
+    ok = os.path.exists(omega_path)
+    if not ok:
+        print(f"[PaTAS] Training attempt did NOT produce {omega_path} — "
+              f"the PTAS server/client scenario likely errored or was "
+              f"interrupted (check for '[PTAS ERROR]' / '[CLIENT ERROR]' "
+              f"above, or a port {cfgd['port']} conflict). "
+              f"Skipping PaTAS filter for this condition.")
+    return ok
 
 
 def ensure_cifar_cache(x_trust: str, y_trust: str, eps: float, epochs: int,
@@ -389,7 +396,15 @@ def ensure_cifar_cache(x_trust: str, y_trust: str, eps: float, epochs: int,
     run_cifar_resnet_scenario(
         epochs=epochs, port=cfgd["port"], x_trust=x_trust, y_trust=y_trust,
         epsilon_low=eps, base_channels=base_channels, noise_level=noise_level)
-    return os.path.exists(omega_path) and os.path.exists(nn_model_path)
+    ok = os.path.exists(omega_path) and os.path.exists(nn_model_path)
+    if not ok:
+        print(f"[PaTAS/CIFAR] Training attempt did NOT produce {omega_path} "
+              f"and/or {nn_model_path} — the PTAS server/client scenario "
+              f"likely errored or was interrupted (check for "
+              f"'[PTAS ERROR]' / '[CLIENT ERROR]' above, or a port "
+              f"{cfgd['port']} conflict). Skipping PaTAS filter for this "
+              f"condition.")
+    return ok
 
 
 # ---------------------------------------------------------------------------
