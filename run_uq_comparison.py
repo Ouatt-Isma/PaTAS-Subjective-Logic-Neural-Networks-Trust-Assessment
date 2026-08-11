@@ -765,4 +765,10 @@ def main():
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    # PaTAS scenario training spawns a PTAS-server + NN-client process pair.
+    # On Linux, multiprocessing defaults to 'fork', which is incompatible
+    # with an already-initialized CUDA context (any GPU tensor allocated in
+    # this process — e.g. the base NN — poisons every forked child). Windows
+    # already defaults to 'spawn'; force it everywhere so GPU runs work.
+    multiprocessing.set_start_method("spawn", force=True)
     main()

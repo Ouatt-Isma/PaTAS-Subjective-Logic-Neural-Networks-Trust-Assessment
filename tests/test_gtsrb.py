@@ -20,6 +20,7 @@ import os
 import sys
 import time
 import argparse
+import multiprocessing
 from typing import Any
 
 # ── Path bootstrap ────────────────────────────────────────────────────────────
@@ -222,4 +223,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Force 'spawn' — 'fork' (Linux default) breaks once CUDA is initialized
+    # in this process, which happens as soon as a torch model is built.
+    multiprocessing.set_start_method("spawn", force=True)
     main()

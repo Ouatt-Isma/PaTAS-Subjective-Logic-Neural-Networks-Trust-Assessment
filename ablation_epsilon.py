@@ -277,4 +277,7 @@ def main():
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    # Force 'spawn' — 'fork' (Linux default) breaks once CUDA is initialized
+    # in this process, which happens as soon as the base NN is built.
+    multiprocessing.set_start_method("spawn", force=True)
     main()
