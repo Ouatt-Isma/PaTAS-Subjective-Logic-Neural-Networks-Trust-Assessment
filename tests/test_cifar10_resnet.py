@@ -125,6 +125,7 @@ def _ptas_worker(result_queue, ready_event, port, x_trust, y_trust,
             trust_assessment_func=trust_assessment,
             epsilon_low=epsilon_low,
         )
+        print(f"[PTASConv] Device: {ptas.device}")
 
         datapath, _ = _cifar_paths(x_trust, y_trust, epsilon_low)
         omega_path = os.path.join(datapath, "omega_arrays.pkl")
@@ -214,6 +215,7 @@ def _client_worker(result_queue, port, epochs, x_trust, y_trust,
                       num_classes=_NUM_CLASSES, specs=specs,
                       ptas=ptas and not ptas_omega_cached,
                       operation=True, port=port)
+        print(f"[ConvNet] Device: {net.device}")
 
         if model_cached:
             print(f"[NN] Saved model found — loading from {nn_model_path}, skipping training.")

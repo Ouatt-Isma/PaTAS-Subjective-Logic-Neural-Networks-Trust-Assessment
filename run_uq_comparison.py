@@ -746,6 +746,8 @@ def parse_args():
 
 
 def main():
+    from uq_methods import print_device_info
+    print_device_info()
     args = parse_args()
     if args.quick:
         args.epochs = 2

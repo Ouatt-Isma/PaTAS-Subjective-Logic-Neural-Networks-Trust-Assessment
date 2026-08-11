@@ -88,6 +88,23 @@ def _style(method: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Device reporting — call once at the start of each driver script so it's
+# obvious from the console whether torch models train on CPU or GPU.
+# ---------------------------------------------------------------------------
+
+def print_device_info() -> torch.device:
+    """Print torch version, CUDA availability and the device that
+    TorchMLP/TorchResNetLite/PaTAS/base-NN training will default to, then
+    return that device."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[Device] torch {torch.__version__}  |  CUDA available: "
+          f"{torch.cuda.is_available()}  |  using device: {device}")
+    if torch.cuda.is_available():
+        print(f"[Device] GPU: {torch.cuda.get_device_name(device)}")
+    return device
+
+
+# ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
 
