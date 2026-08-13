@@ -32,8 +32,14 @@ Outputs per dataset AND per training condition
                                        noise0.3, ...), with AUC values
     coverage_accuracy_<cond>.pdf/.png  accuracy–coverage curves per condition
     metrics_vs_noise.pdf/.png          Accuracy / AUROC / ECE vs noise level
-    ece_table.tex                      LaTeX table: Acc / AUROC / AURC / ECE,
-                                       one block per test condition
+    ece_table.tex                      LaTeX table: Acc / AUROC / AURC / ECE /
+                                       ECE-calibrated, one block per test
+                                       condition. ECE-calibrated re-scores
+                                       each method's own confidence through
+                                       an isotonic map fit once per method on
+                                       a held-out clean split (same treatment
+                                       for every method, so no method is
+                                       singled out for recalibration)
     summary.json                       all metrics, machine-readable
     scores.npz                         raw per-sample scores per condition
 
@@ -87,6 +93,7 @@ from uq_methods import (
     train_torch_model, predict_probs, mc_dropout_predict, edl_predict,
     load_or_train,
     ece_from_confidence, aurc, roc_correctness,
+    fit_calibrator, apply_calibrator,
     plot_roc_methods, plot_coverage_methods,
 )
 
@@ -434,24 +441,30 @@ def write_tex_table(metrics_by_cond: dict, dataset: str, out_path: str,
         r"as in the training-noise model): area under the ROC curve for "
         r"correct-vs-incorrect discrimination (AUROC, higher is better), "
         r"area under the risk--coverage curve (AURC, lower is better), and "
-        r"Expected Calibration Error (ECE, lower is better). DeepTrust has "
+        r"Expected Calibration Error before and after post-hoc isotonic "
+        r"recalibration (ECE / ECE$_{\text{cal}}$, lower is better; the "
+        r"calibrator for each method is fit once on a held-out clean split "
+        r"and reused unchanged across all test-noise conditions, so no "
+        r"method is treated differently). DeepTrust has "
         r"no public implementation; values are those reported by Cheng et~al.}",
         rf"\label{{tab:uq-comparison-{dataset}{'-' + train_tag if train_tag else ''}}}",
-        r"\begin{tabular}{lcccc}",
+        r"\begin{tabular}{lccccc}",
         r"\toprule",
-        r"Method & Accuracy (\%) & AUROC $\uparrow$ & AURC $\downarrow$ & ECE $\downarrow$ \\",
+        r"Method & Accuracy (\%) & AUROC $\uparrow$ & AURC $\downarrow$ & "
+        r"ECE $\downarrow$ & ECE$_{\text{cal}}$ $\downarrow$ \\",
     ]
     for noise, metrics in metrics_by_cond.items():
         cond = (r"\textit{Clean test data}" if noise == 0 else
                 rf"\textit{{Feature noise $p={noise:g}$}}")
-        lines += [r"\midrule", rf"\multicolumn{{5}}{{l}}{{{cond}}} \\"]
+        lines += [r"\midrule", rf"\multicolumn{{6}}{{l}}{{{cond}}} \\"]
         for method in ("patas", "softmax", "mc_dropout", "edl"):
             if method not in metrics:
                 continue
             m = metrics[method]
             lines.append(
                 f"{label_map[method]} & {_f(m.get('test_acc', np.nan)*100, '{:.2f}')} & "
-                f"{_f(m.get('auroc'))} & {_f(m.get('aurc'))} & {_f(m.get('ece'))} \\\\")
+                f"{_f(m.get('auroc'))} & {_f(m.get('aurc'))} & {_f(m.get('ece'))} & "
+                f"{_f(m.get('ece_calib'))} \\\\")
         if noise == 0:
             dt = DEEPTRUST_PAPER.get(dataset)
             if dt:
@@ -459,12 +472,12 @@ def write_tex_table(metrics_by_cond: dict, dataset: str, out_path: str,
                 lines.append(
                     f"DeepTrust~\\cite{{cheng2020deeptrust}}$^{{\\dagger}}$ & "
                     f"{_f(acc*100 if acc is not None else None, '{:.2f}')} & "
-                    f"{_f(dt.get('auroc'))} & — & {_f(dt.get('ece'))} \\\\")
+                    f"{_f(dt.get('auroc'))} & — & {_f(dt.get('ece'))} & — \\\\")
             else:
-                lines.append(r"DeepTrust~\cite{cheng2020deeptrust}$^{\dagger}$ & — & — & — & — \\")
+                lines.append(r"DeepTrust~\cite{cheng2020deeptrust}$^{\dagger}$ & — & — & — & — & — \\")
     lines += [
         r"\bottomrule",
-        r"\multicolumn{5}{l}{\footnotesize $^{\dagger}$No public code; "
+        r"\multicolumn{6}{l}{\footnotesize $^{\dagger}$No public code; "
         r"values as reported in the original paper (fill \texttt{DEEPTRUST\_PAPER}).}\\",
         r"\end{tabular}",
         r"\end{table}",
@@ -536,18 +549,27 @@ def score_all_methods(Xn, ys, dataset, arch, cfgd, args, is_conv,
     return results
 
 
-def compute_metrics(results: dict) -> dict:
+def compute_metrics(results: dict, calibrators: Optional[dict] = None) -> dict:
+    """calibrators: optional {method: fitted isotonic calibrator}, fit once
+    on a held-out clean split (see run_condition) and reused across every
+    test-noise condition. When given, adds 'ece_calib' — ECE after mapping
+    each method's own 'conf' through its own calibrator, so every method
+    gets the same post-hoc treatment (no method is singled out)."""
     metrics: dict = {}
     for method, res in results.items():
         _, _, auroc = roc_correctness(res["score"], res["correct"])
-        metrics[method] = {
+        m = {
             "test_acc": res["test_acc"],
             "auroc": auroc,
             "aurc": aurc(res["score"], res["correct"]),
             "ece": ece_from_confidence(res["conf"], res["correct"]),
         }
+        if calibrators and calibrators.get(method) is not None:
+            calibrated_conf = apply_calibrator(calibrators[method], res["conf"])
+            m["ece_calib"] = ece_from_confidence(calibrated_conf, res["correct"])
         if "trust" in res:
-            metrics[method]["mean_trust"] = float(np.nanmean(res["trust"]))
+            m["mean_trust"] = float(np.nanmean(res["trust"]))
+        metrics[method] = m
     return metrics
 
 
@@ -584,6 +606,14 @@ def run_condition(dataset: str, cond: TrainCondition, args) -> dict:
     n_sub = min(args.subset, len(X_test))
     idx = np.sort(rng.choice(len(X_test), size=n_sub, replace=False))
     Xs, ys = X_test[idx], y_test_lbl[idx]
+
+    # Disjoint calibration split (clean features) for post-hoc ECE recalibration —
+    # drawn once here, before any noise is applied, and never scored/reported on
+    # directly so it can't leak into the evaluation metrics above.
+    remaining = np.setdiff1d(np.arange(len(X_test)), idx, assume_unique=True)
+    n_calib = min(n_sub, len(remaining))
+    calib_idx = rng.choice(remaining, size=n_calib, replace=False) if n_calib > 0 else remaining
+    Xc, yc = X_test[calib_idx], y_test_lbl[calib_idx]
 
     is_conv = dataset == "cifar10"
 
@@ -642,11 +672,24 @@ def run_condition(dataset: str, cond: TrainCondition, args) -> dict:
             annealing_epochs=max(args.epochs // 2, 1), seed=args.seed),
         force_retrain=args.force_retrain)
 
+    # ---- Fit one post-hoc calibrator per method on the held-out clean split --
+    # Every method (softmax, patas, mc_dropout, edl) is calibrated the same
+    # way, fit once here and reused unchanged across every test-noise
+    # condition below — so recalibration can't be biased toward any one
+    # method, and ECE-after-calibration reflects how well each method's
+    # calibration *transfers* under feature noise it wasn't fit on.
+    calibrators: dict = {}
+    if n_calib > 0:
+        calib_results = score_all_methods(Xc, yc, dataset, arch, cfgd, args, is_conv,
+                                          base, ptas, mc_model, edl_model, cond)
+        calibrators = {method: fit_calibrator(res["conf"], res["correct"])
+                       for method, res in calib_results.items()}
+
     # ---- Evaluate on every test condition -------------------------------------
     title = {"mnist": "MNIST", "gtsrb": "GTSRB", "cifar10": "CIFAR-10"}[dataset]
     full_title = f"{title} — {cond.label}" if cond.tag else title
     metrics_by_cond: dict = {}
-    npz_payload = {"idx": idx, "y": ys}
+    npz_payload = {"idx": idx, "y": ys, "calib_idx": calib_idx}
 
     for nl in noise_levels:
         tag = "clean" if nl == 0 else f"noise{nl:g}"
@@ -656,14 +699,14 @@ def run_condition(dataset: str, cond: TrainCondition, args) -> dict:
 
         results = score_all_methods(Xn, ys, dataset, arch, cfgd, args, is_conv,
                                     base, ptas, mc_model, edl_model, cond)
-        metrics = compute_metrics(results)
+        metrics = compute_metrics(results, calibrators)
         metrics_by_cond[nl] = metrics
 
-        print(f"\n  {'Method':<14} {'Acc':>8} {'AUROC':>8} {'AURC':>8} {'ECE':>8}")
-        print("  " + "-" * 50)
+        print(f"\n  {'Method':<14} {'Acc':>8} {'AUROC':>8} {'AURC':>8} {'ECE':>8} {'ECE-cal':>8}")
+        print("  " + "-" * 60)
         for method, m in metrics.items():
             print(f"  {method:<14} {m['test_acc']*100:7.2f}% {m['auroc']:8.3f} "
-                  f"{m['aurc']:8.3f} {m['ece']:8.3f}")
+                  f"{m['aurc']:8.3f} {m['ece']:8.3f} {m.get('ece_calib', float('nan')):8.3f}")
 
         plot_roc_methods(results, os.path.join(out_dir, f"roc_{tag}"),
                          f"{full_title} ({cond_lbl}) — correct-vs-incorrect ROC")
@@ -674,6 +717,9 @@ def run_condition(dataset: str, cond: TrainCondition, args) -> dict:
             for k, v in r.items():
                 if isinstance(v, np.ndarray):
                     npz_payload[f"{tag}_{m}_{k}"] = np.asarray(v)
+            if calibrators.get(m) is not None:
+                npz_payload[f"{tag}_{m}_conf_calib"] = apply_calibrator(
+                    calibrators[m], results[m]["conf"])
 
     # ---- Cross-condition outputs -------------------------------------------
     if len(noise_levels) > 1:

@@ -487,6 +487,43 @@ def aurc(scores: np.ndarray, correct: np.ndarray) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Post-hoc calibration
+# ---------------------------------------------------------------------------
+
+def fit_calibrator(conf: np.ndarray, correct: np.ndarray):
+    """Fit an isotonic map conf -> P(correct) on a held-out calibration split.
+
+    Isotonic regression is used because it is method-agnostic (works on any
+    score in [0, 1], regardless of what produced it — softmax probability,
+    MC-Dropout mean probability, EDL expected probability, or the PaTAS
+    trust-discounted score) and rank-preserving (a monotonic transform of
+    `conf` cannot change AUROC/AURC), so applying it isolates calibration
+    from detection quality. Returns None if there's nothing usable to fit.
+    """
+    from sklearn.isotonic import IsotonicRegression
+    conf = np.asarray(conf, dtype=float)
+    correct = np.asarray(correct, dtype=float)
+    ok = np.isfinite(conf)
+    if ok.sum() < 2:
+        return None
+    iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+    iso.fit(conf[ok], correct[ok])
+    return iso
+
+
+def apply_calibrator(calibrator, conf: np.ndarray) -> np.ndarray:
+    """Map raw `conf` through a fitted calibrator; NaNs pass through."""
+    conf = np.asarray(conf, dtype=float)
+    out = np.full_like(conf, np.nan, dtype=float)
+    if calibrator is None:
+        return out
+    ok = np.isfinite(conf)
+    if ok.any():
+        out[ok] = calibrator.predict(conf[ok])
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Figures — one colour per method, consistent across the chapter
 # ---------------------------------------------------------------------------
 
@@ -523,8 +560,9 @@ def plot_metrics_vs_noise(metrics_by_cond: Dict[float, Dict[str, dict]],
     methods = list(next(iter(metrics_by_cond.values())).keys())
     panels = (("test_acc", "Accuracy (%)", 100.0),
               ("auroc", "AUROC $\\uparrow$", 1.0),
-              ("ece", "ECE $\\downarrow$", 1.0))
-    fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.2))
+              ("ece", "ECE $\\downarrow$", 1.0),
+              ("ece_calib", "ECE, calibrated $\\downarrow$", 1.0))
+    fig, axes = plt.subplots(1, 4, figsize=(18.0, 4.2))
     for ax, (key, ylabel, scale) in zip(axes, panels):
         for method in methods:
             st = _style(method)
