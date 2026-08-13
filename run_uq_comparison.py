@@ -50,12 +50,20 @@ Usage
     python run_uq_comparison.py --dataset gtsrb --epochs 20
     python run_uq_comparison.py --dataset cifar10 --train-missing
     python run_uq_comparison.py --dataset mnist --quick           # smoke test
+    python run_uq_comparison.py --dataset mnist --fuse-method cumulative --train-missing
 
 Cache reuse (x_trust/y_trust = trust/trust for clean, trust/vacuous for
 train-time label noise):
     base NN     results/NN_Train_<ds>_<arch>_<x_trust>_<y_trust>_PathSize_None/nn_model.pkl
-    PaTAS       results/PTAS_Eval_<ds>_<arch>_<x_trust>_<y_trust>_eps_<eps>_PathSize_None/omega_arrays.pkl
+    PaTAS       results/PTAS_Eval_<ds>_<arch>_<x_trust>_<y_trust>_eps_<eps>_PathSize_None[_fuse_<method>]/omega_arrays.pkl
     MC/EDL      results/UQ_Train_<ds>_<arch>[_labelnoise<p>]_{mcdropout,edl}/model.pt
+
+--fuse-method (average | cumulative | weighted, default average) selects the
+subjective-logic fusion operator GenIPTA uses to combine the per-sample
+activated-path weight opinions into one trust value, and that PTAS.run_chunk
+uses to revise omegas during training. Non-default values get their own
+PTAS_Eval_..._fuse_<method> cache dir (never collides with --fuse-method
+average runs), so pair a change with --train-missing.
 
 The MNIST/GTSRB PaTAS filter uses per-sample IPTA (exact path-conditioned
 trust).  For CIFAR-10 the PaTAS mirror is convolutional, where IPTA is not
@@ -312,7 +320,7 @@ def patas_ipta_scores(ptas, base_nn, X: np.ndarray, input_dim: int) -> dict:
 
 
 def patas_class_trust_scores(dataset: str, arch, eps: float,
-                             probs: np.ndarray,
+                             probs: np.ndarray, fuse_method: str = "average",
                              x_trust: str = "trust", y_trust: str = "trust"
                              ) -> Optional[dict]:
     """Conv fallback (CIFAR-10): softmax confidence discounted by the projected
@@ -321,7 +329,7 @@ def patas_class_trust_scores(dataset: str, arch, eps: float,
     factor at class rather than activation-path granularity — IPTA is not
     defined for conv layers."""
     at_path = os.path.join(
-        _ptas_dir(dataset, arch, eps, "average", x_trust, y_trust), "at.pkl")
+        _ptas_dir(dataset, arch, eps, fuse_method, x_trust, y_trust), "at.pkl")
     if not os.path.exists(at_path):
         return None
     with open(at_path, "rb") as fh:
@@ -516,7 +524,8 @@ def score_all_methods(Xn, ys, dataset, arch, cfgd, args, is_conv,
     sc = None
     if is_conv:
         sc = patas_class_trust_scores(dataset, arch, args.eps, probs_base,
-                                      cond.x_trust, cond.y_trust)
+                                      fuse_method=args.fuse_method,
+                                      x_trust=cond.x_trust, y_trust=cond.y_trust)
     elif ptas is not None:
         t0 = time.time()
         sc = patas_ipta_scores(ptas, base, Xn, cfgd["input_dim"])
@@ -634,9 +643,11 @@ def run_condition(dataset: str, cond: TrainCondition, args) -> dict:
     ptas = None
     if not is_conv and ensure_patas_cache(dataset, arch, args.eps, args.epochs,
                                           args.train_missing,
+                                          fuse_method=args.fuse_method,
                                           x_trust=cond.x_trust, y_trust=cond.y_trust,
                                           noise_level=cond.noise_level):
         ptas = load_offline_ptas(dataset, arch, args.eps,
+                                 fuse_method=args.fuse_method,
                                  x_trust=cond.x_trust, y_trust=cond.y_trust)
 
     def _factory_dropout():
@@ -732,6 +743,7 @@ def run_condition(dataset: str, cond: TrainCondition, args) -> dict:
     np.savez_compressed(os.path.join(out_dir, "scores.npz"), **npz_payload)
     with open(os.path.join(out_dir, "summary.json"), "w", encoding="utf-8") as fh:
         json.dump({"dataset": dataset, "arch": _arch_str(arch), "eps": args.eps,
+                   "fuse_method": args.fuse_method,
                    "epochs": args.epochs, "subset": n_sub,
                    "mc_passes": args.mc_passes, "dropout": args.dropout,
                    "train_condition": {"tag": cond.tag, "x_trust": cond.x_trust,
@@ -765,6 +777,13 @@ def parse_args():
                    help="Training epochs for models that need training (default 20)")
     p.add_argument("--eps", type=float, default=_DEFAULT_EPS,
                    help=f"PaTAS epsilon of the cached omegas (default {_DEFAULT_EPS})")
+    p.add_argument("--fuse-method", choices=["average", "cumulative", "weighted"],
+                   default="average",
+                   help="Trust-revision fusion operator used both when training "
+                        "the PaTAS omegas and when GenIPTA fuses the per-sample "
+                        "activated-path opinions at inference (default: average). "
+                        "Changing it trains/caches a separate PTAS_Eval directory "
+                        "(suffixed _fuse_<method>), so pair with --train-missing.")
     p.add_argument("--subset", type=int, default=2000,
                    help="Test samples used for scoring (IPTA is per-sample; default 2000)")
     p.add_argument("--mc-passes", type=int, default=30,
