@@ -51,6 +51,7 @@ Usage
     python run_uq_comparison.py --dataset cifar10 --train-missing
     python run_uq_comparison.py --dataset mnist --quick           # smoke test
     python run_uq_comparison.py --dataset mnist --fuse-method cumulative --train-missing
+    python run_uq_comparison.py --dataset mnist --force-retrain-all     # wipe & retrain everything
 
 Cache reuse (x_trust/y_trust = trust/trust for clean, trust/vacuous for
 train-time label noise):
@@ -58,12 +59,13 @@ train-time label noise):
     PaTAS       results/PTAS_Eval_<ds>_<arch>_<x_trust>_<y_trust>_eps_<eps>_PathSize_None[_fuse_<method>]/omega_arrays.pkl
     MC/EDL      results/UQ_Train_<ds>_<arch>[_labelnoise<p>]_{mcdropout,edl}/model.pt
 
---fuse-method (average | cumulative | weighted, default average) selects the
-subjective-logic fusion operator GenIPTA uses to combine the per-sample
-activated-path weight opinions into one trust value, and that PTAS.run_chunk
-uses to revise omegas during training. Non-default values get their own
-PTAS_Eval_..._fuse_<method> cache dir (never collides with --fuse-method
-average runs), so pair a change with --train-missing.
+--fuse-method (average | cumulative | weighted | compromise | constraint,
+default average) selects the subjective-logic fusion operator GenIPTA uses
+to combine the per-sample activated-path weight opinions into one trust
+value, and that PTAS.run_chunk uses to revise omegas during training.
+Non-default values get their own PTAS_Eval_..._fuse_<method> cache dir
+(never collides with --fuse-method average runs), so pair a change with
+--train-missing.
 
 The MNIST/GTSRB PaTAS filter uses per-sample IPTA (exact path-conditioned
 trust).  For CIFAR-10 the PaTAS mirror is convolutional, where IPTA is not
@@ -79,6 +81,7 @@ import io
 import json
 import time
 import pickle
+import shutil
 import argparse
 import contextlib
 import multiprocessing
@@ -183,7 +186,8 @@ def label_noise_condition(rate: float) -> TrainCondition:
 
 def get_base_mlp(dataset: str, arch: tuple, X_train, y_train, X_test, y_test,
                  epochs: int, train_missing: bool,
-                 x_trust: str = "trust", y_trust: str = "trust"):
+                 x_trust: str = "trust", y_trust: str = "trust",
+                 force_retrain: bool = False):
     from NN.primaryNN import NeuralNetwork
     from NN.utils import writedict
 
@@ -192,16 +196,18 @@ def get_base_mlp(dataset: str, arch: tuple, X_train, y_train, X_test, y_test,
     model_path = os.path.join(nn_dir, "nn_model.pkl")
     nn = NeuralNetwork(cfg["input_dim"], hidden_sizes=list(arch),
                        output_size=cfg["output_dim"], ptas=False, operation=True)
-    if os.path.exists(model_path):
+    cached = os.path.exists(model_path)
+    if cached and not force_retrain:
         nn.load_model(model_path)
         return nn
-    if not train_missing:
+    if not cached and not train_missing:
         raise FileNotFoundError(
             f"Base model not found: {model_path}\n"
             f"Run the {x_trust}/{y_trust} scenario first "
             f"or pass --train-missing.")
     print(f"[BASE] Training base NN for {dataset} {arch} "
-          f"({x_trust}/{y_trust}, no PaTAS attached) ...")
+          f"({x_trust}/{y_trust}, no PaTAS attached)"
+          f"{' — forced retrain' if cached else ''} ...")
     os.makedirs(nn_dir, exist_ok=True)
     nn.train(X_train, y_train, X_test, y_test, epochs=epochs, batch_size=128,
              lr_scheduler=_lr_for(dataset), shuffle=True, plot=False, fname=nn_dir)
@@ -215,7 +221,8 @@ def get_base_mlp(dataset: str, arch: tuple, X_train, y_train, X_test, y_test,
 
 def get_base_convnet(X_train, y_train, X_test, y_test, epochs: int,
                      train_missing: bool,
-                     x_trust: str = "trust", y_trust: str = "trust"):
+                     x_trust: str = "trust", y_trust: str = "trust",
+                     force_retrain: bool = False):
     from NN.convNN import ConvNet, cifar10_resnet_specs
     from NN.utils import writedict
 
@@ -229,15 +236,16 @@ def get_base_convnet(X_train, y_train, X_test, y_test, epochs: int,
     net = ConvNet(img_size=cfg["img_size"], in_channels=cfg["in_channels"],
                   num_classes=cfg["output_dim"], base_channels=cfg["base_channels"],
                   ptas=False, operation=True, specs=specs)
-    if os.path.exists(model_path):
+    cached = os.path.exists(model_path)
+    if cached and not force_retrain:
         net.load_model(model_path)
         return net, specs
-    if not train_missing:
+    if not cached and not train_missing:
         raise FileNotFoundError(
             f"Base ConvNet not found: {model_path}\n"
             f"Run tests/test_cifar10_resnet.py first or pass --train-missing.")
     print(f"[BASE] Training CIFAR-10 ResNet-lite ({x_trust}/{y_trust}, "
-          f"no PaTAS attached) ...")
+          f"no PaTAS attached){' — forced retrain' if cached else ''} ...")
     hist = net.train(X_train, y_train, X_test, y_test, epochs=epochs,
                      batch_size=128, lr_scheduler=_lr_for("cifar10"))
     os.makedirs(nn_dir, exist_ok=True)
@@ -346,20 +354,26 @@ def patas_class_trust_scores(dataset: str, arch, eps: float,
 def ensure_patas_cache(dataset: str, arch: tuple, eps: float, epochs: int,
                        train_missing: bool, fuse_method: str = "average",
                        x_trust: str = "trust", y_trust: str = "trust",
-                       noise_level: Optional[float] = None) -> bool:
+                       noise_level: Optional[float] = None,
+                       force_retrain: bool = False) -> bool:
     """Make sure omega_arrays.pkl exists; optionally run the scenario."""
-    omega_path = os.path.join(
-        _ptas_dir(dataset, arch, eps, fuse_method, x_trust, y_trust),
-        "omega_arrays.pkl")
-    if os.path.exists(omega_path):
+    ptas_dir = _ptas_dir(dataset, arch, eps, fuse_method, x_trust, y_trust)
+    omega_path = os.path.join(ptas_dir, "omega_arrays.pkl")
+    cached = os.path.exists(omega_path)
+    if cached and not force_retrain:
         return True
-    if not train_missing:
+    if not cached and not train_missing:
         print(f"[PaTAS] Missing {omega_path}\n"
               f"        Run the {x_trust}/{y_trust} scenario "
               f"or pass --train-missing.  Skipping PaTAS filter.")
         return False
+    if cached and force_retrain:
+        # start_ptas() below only retrains when omega_arrays.pkl is absent, so
+        # the stale cache (and its at/av/ad.pkl, plot, log) must go first.
+        shutil.rmtree(ptas_dir)
     print(f"[PaTAS] Training scenario for {dataset} {arch} eps={eps} "
-          f"fuse={fuse_method} {x_trust}/{y_trust} ...")
+          f"fuse={fuse_method} {x_trust}/{y_trust}"
+          f"{' (forced retrain)' if cached else ''} ...")
     from main import TestCaseConfig
     from test_mnist import run_scenario  # generic over cfg
     cfgd = DATASET_CFG[dataset]
@@ -384,7 +398,8 @@ def ensure_patas_cache(dataset: str, arch: tuple, eps: float, epochs: int,
 
 def ensure_cifar_cache(x_trust: str, y_trust: str, eps: float, epochs: int,
                        base_channels: int, train_missing: bool,
-                       noise_level: Optional[float] = None) -> bool:
+                       noise_level: Optional[float] = None,
+                       force_retrain: bool = False) -> bool:
     """Make sure the CIFAR-10 ResNet-lite PTAS+NN caches exist for the given
     (x_trust, y_trust) training condition; optionally run the scenario.
 
@@ -397,15 +412,23 @@ def ensure_cifar_cache(x_trust: str, y_trust: str, eps: float, epochs: int,
     nn_dir = _nn_dir("cifar10", "resnet-lite", x_trust, y_trust)
     omega_path = os.path.join(ptas_dir, "omega_arrays.pkl")
     nn_model_path = os.path.join(nn_dir, "nn_model.pkl")
-    if os.path.exists(omega_path) and os.path.exists(nn_model_path):
+    cached = os.path.exists(omega_path) and os.path.exists(nn_model_path)
+    if cached and not force_retrain:
         return True
-    if not train_missing:
+    if not cached and not train_missing:
         print(f"[PaTAS/CIFAR] Missing {omega_path} or {nn_model_path}\n"
               f"        Run tests/test_cifar10_resnet.py --xtrust {x_trust} "
               f"--ytrust {y_trust} or pass --train-missing.")
         return False
+    if force_retrain:
+        # run_cifar_resnet_scenario() below only retrains what's absent, so
+        # both stale caches must go first for a true forced retrain.
+        if os.path.exists(ptas_dir):
+            shutil.rmtree(ptas_dir)
+        if os.path.exists(nn_dir):
+            shutil.rmtree(nn_dir)
     print(f"[PaTAS/CIFAR] Training scenario for cifar10 resnet-lite eps={eps} "
-          f"{x_trust}/{y_trust} ...")
+          f"{x_trust}/{y_trust}{' (forced retrain)' if cached else ''} ...")
     from test_cifar10_resnet import run_cifar_resnet_scenario
     cfgd = DATASET_CFG["cifar10"]
     run_cifar_resnet_scenario(
@@ -631,21 +654,24 @@ def run_condition(dataset: str, cond: TrainCondition, args) -> dict:
     if is_conv:
         ensure_cifar_cache(cond.x_trust, cond.y_trust, args.eps, args.epochs,
                            cfgd["base_channels"], args.train_missing,
-                           cond.noise_level)
+                           cond.noise_level, force_retrain=args.force_retrain_all)
         base, specs = get_base_convnet(X_train, y_train, X_test, y_test,
                                        args.epochs, args.train_missing,
-                                       cond.x_trust, cond.y_trust)
+                                       cond.x_trust, cond.y_trust,
+                                       force_retrain=args.force_retrain_all)
     else:
         base = get_base_mlp(dataset, arch, X_train, y_train, X_test, y_test,
                             args.epochs, args.train_missing,
-                            cond.x_trust, cond.y_trust)
+                            cond.x_trust, cond.y_trust,
+                            force_retrain=args.force_retrain_all)
 
     ptas = None
     if not is_conv and ensure_patas_cache(dataset, arch, args.eps, args.epochs,
                                           args.train_missing,
                                           fuse_method=args.fuse_method,
                                           x_trust=cond.x_trust, y_trust=cond.y_trust,
-                                          noise_level=cond.noise_level):
+                                          noise_level=cond.noise_level,
+                                          force_retrain=args.force_retrain_all):
         ptas = load_offline_ptas(dataset, arch, args.eps,
                                  fuse_method=args.fuse_method,
                                  x_trust=cond.x_trust, y_trust=cond.y_trust)
@@ -777,13 +803,20 @@ def parse_args():
                    help="Training epochs for models that need training (default 20)")
     p.add_argument("--eps", type=float, default=_DEFAULT_EPS,
                    help=f"PaTAS epsilon of the cached omegas (default {_DEFAULT_EPS})")
-    p.add_argument("--fuse-method", choices=["average", "cumulative", "weighted"],
+    p.add_argument("--fuse-method",
+                   choices=["average", "cumulative", "weighted", "compromise", "constraint"],
                    default="average",
                    help="Trust-revision fusion operator used both when training "
                         "the PaTAS omegas and when GenIPTA fuses the per-sample "
                         "activated-path opinions at inference (default: average). "
-                        "Changing it trains/caches a separate PTAS_Eval directory "
-                        "(suffixed _fuse_<method>), so pair with --train-missing.")
+                        "'compromise' (consensus & compromise fusion) and "
+                        "'constraint' (Dempster's-rule-style belief constraint "
+                        "fusion) are more aggressive than average/cumulative at "
+                        "preserving/amplifying agreement between fused opinions, "
+                        "so may resist the variance-collapse-with-width effect "
+                        "seen with 'average'. Changing it trains/caches a "
+                        "separate PTAS_Eval directory (suffixed _fuse_<method>), "
+                        "so pair with --train-missing.")
     p.add_argument("--subset", type=int, default=2000,
                    help="Test samples used for scoring (IPTA is per-sample; default 2000)")
     p.add_argument("--mc-passes", type=int, default=30,
@@ -805,6 +838,11 @@ def parse_args():
                    help="Train any missing base/PaTAS caches instead of failing")
     p.add_argument("--force-retrain", action="store_true",
                    help="Retrain the MC-Dropout/EDL models even if cached")
+    p.add_argument("--force-retrain-all", action="store_true",
+                   help="Retrain every cache — base NN, PaTAS, MC-Dropout, "
+                        "EDL — even if already cached, instead of just "
+                        "MC-Dropout/EDL like --force-retrain. Implies "
+                        "--force-retrain and --train-missing.")
     p.add_argument("--quick", action="store_true",
                    help="Smoke test: 2 epochs, 300-sample subset, T=5")
     return p.parse_args()
@@ -814,6 +852,9 @@ def main():
     from uq_methods import print_device_info
     print_device_info()
     args = parse_args()
+    if args.force_retrain_all:
+        args.force_retrain = True
+        args.train_missing = True
     if args.quick:
         args.epochs = 2
         args.subset = 300
