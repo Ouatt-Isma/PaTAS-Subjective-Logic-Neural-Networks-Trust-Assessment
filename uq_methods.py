@@ -388,19 +388,30 @@ def load_or_train(model_factory: Callable[[], nn.Module], cache_path: str,
 
 def apply_feature_noise(X: np.ndarray, noise_prob: float,
                         noise_scale: float = 0.3, seed: int = 0) -> np.ndarray:
-    """Vectorised, seeded version of NN.datasets.noised_features.
+    """Vectorised, seeded, range-aware version of NN.datasets.noised_features.
 
     Each feature is corrupted independently with probability ``noise_prob``
-    by adding uniform noise in [-noise_scale, +noise_scale]; values are
-    clipped to [0, 1].  The input is not modified.
+    by adding uniform noise in ±(noise_scale × feature span); results are
+    clipped to the data's own [min, max] range.  The input is not modified.
+
+    For [0,1]-scaled data (GTSRB, CIFAR-10) this reproduces the historical
+    behaviour exactly (span = 1, clip to [0,1]).  For standardized data —
+    MNIST features live in ≈[−0.42, 2.82] — the old hard clip to [0,1]
+    clamped EVERY pixel of the image (background sits at −0.42), so the
+    "noise" conditions measured a global clipping artifact that saturated at
+    the first noise level instead of the intended Bernoulli corruption.
+    Clipping to the observed range corrupts only the masked pixels.
     """
     if noise_prob <= 0:
         return X
     rng = np.random.default_rng(seed)
     Xn = X.astype(np.float32, copy=True)
+    lo, hi = float(X.min()), float(X.max())
+    span = max(hi - lo, 1e-6)
     mask = rng.random(Xn.shape) < noise_prob
-    Xn[mask] += ((rng.random(int(mask.sum())) * 2 - 1) * noise_scale).astype(np.float32)
-    return np.clip(Xn, 0.0, 1.0)
+    Xn[mask] += ((rng.random(int(mask.sum())) * 2 - 1)
+                 * noise_scale * span).astype(np.float32)
+    return np.clip(Xn, lo, hi)
 
 
 # ---------------------------------------------------------------------------

@@ -59,6 +59,7 @@ from main import (  # main.py lives inside patas_module/
     get_lr_mnist,
     start_ptas,
     start_client,
+    nn_cache_dir,
 )
 
 try:
@@ -232,10 +233,8 @@ def _client_worker(cfg: TestCaseConfig, result_queue: "multiprocessing.Queue[dic
         start_client(cfg, not_ptas=False)
         hidden_list = list(cfg.hidden_dims) if cfg.hidden_dims else [cfg.hidden_dim]
         arch_str = "_".join(str(h) for h in hidden_list)
-        datapath = (
-            f"results/NN_Train_{cfg.dataset}_{arch_str}"
-            f"_{cfg.x_trust}_{cfg.y_trust}_PathSize_None"
-        )
+        datapath = nn_cache_dir(cfg.dataset, arch_str, cfg.x_trust, cfg.y_trust,
+                                noise_level=cfg.noise_level)
         metrics = _read_metrics(os.path.join(datapath, "metrics.txt"))
         result_queue.put(metrics)
     except Exception as exc:
@@ -252,10 +251,8 @@ def _client_only_worker(cfg: TestCaseConfig, result_queue: "multiprocessing.Queu
         start_client(cfg, not_ptas=True)
         hidden_list = list(cfg.hidden_dims) if cfg.hidden_dims else [cfg.hidden_dim]
         arch_str = "_".join(str(h) for h in hidden_list)
-        datapath = (
-            f"results/NN_Train_{cfg.dataset}_{arch_str}"
-            f"_{cfg.x_trust}_{cfg.y_trust}_PathSize_None"
-        )
+        datapath = nn_cache_dir(cfg.dataset, arch_str, cfg.x_trust, cfg.y_trust,
+                                noise_level=cfg.noise_level)
         metrics = _read_metrics(os.path.join(datapath, "metrics.txt"))
         result_queue.put(metrics)
     except Exception as exc:
