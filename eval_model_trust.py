@@ -23,10 +23,16 @@ per rate and reports, per rate:
     * test accuracy                 ground truth (uses labels — the quantity
                                     the label-free signals should track)
 
-The headline result is the correlation table: PaTAS trust degrades
-monotonically with the training-label corruption while softmax confidence
-stays comparatively flat/overconfident — trust reflects how the network was
-*trained*, confidence only how it *predicts*.
+The headline result is the detection margin, not a regression fit: PaTAS
+trust acts as a corruption tripwire — it drops by a large margin at ANY
+non-zero flip rate, including rates so low that accuracy and confidence
+barely move — and it reads this from the training dynamics alone (the
+feedforward trust uses no test data whatsoever).  Mean softmax confidence,
+by contrast, tracks the flip rate almost linearly (cross-entropy on
+p-flipped labels converges to confidence ≈ label purity), so it *measures*
+corruption severity but only given a clean labelled test set to read it on,
+and its moderate values are indistinguishable from a merely-hard task.
+Both views (per-rate margins and correlations with accuracy) are reported.
 
 Every label-noise rate gets its own cache directories (suffix _nl<p>), so
 rates never collide; the p=0 row reuses the standard clean-condition caches
@@ -211,6 +217,23 @@ def plot_rows(rows: list[dict], out_base: str, title: str) -> None:
     print(f"  Saved {out_base}.pdf")
 
 
+def add_margins(rows: list[dict]) -> None:
+    """Relative drops vs. the clean (p=0) row, in place: how far each
+    label-free signal falls below its own clean-model baseline."""
+    base = next((r for r in rows if r["rate"] == 0), None)
+    for r in rows:
+        if base is None or r["rate"] == 0:
+            r["trust_drop_rel"] = 0.0 if r["rate"] == 0 else float("nan")
+            r["conf_drop_rel"] = 0.0 if r["rate"] == 0 else float("nan")
+            continue
+        t0, c0 = base.get("ff_trust"), base.get("mean_conf")
+        r["trust_drop_rel"] = ((t0 - r["ff_trust"]) / t0
+                               if t0 and np.isfinite(r.get("ff_trust", np.nan))
+                               else float("nan"))
+        r["conf_drop_rel"] = ((c0 - r["mean_conf"]) / c0
+                              if c0 else float("nan"))
+
+
 def write_table(rows: list[dict], correlations: dict, dataset: str,
                 out_path: str) -> None:
     def _f(v, fmt="{:.3f}"):
@@ -219,35 +242,44 @@ def write_table(rows: list[dict], correlations: dict, dataset: str,
     lines = [
         r"\begin{table}[ht]",
         r"\centering",
-        r"\caption{Label-free training-quality audit on " + dataset.upper() +
+        r"\caption{Training-quality audit on " + dataset.upper() +
         r": models trained under increasing train-time label-flip rates $p$ "
-        r"(clean features). PaTAS model-side trust — the propagated opinion "
-        r"of the trained weight-opinion network under a fully trusted input "
-        r"— degrades with the corruption of the training labels, while the "
-        r"network's own mean softmax confidence stays high; neither signal "
-        r"uses test labels. $r$/$\rho$: Pearson/Spearman correlation with "
-        r"test accuracy across rates.}",
+        r"(clean features). PaTAS model-side trust — the opinion of the "
+        r"trained weight-opinion network under a fully trusted input — is "
+        r"read from the training dynamics alone (no test data at all) and "
+        r"drops by a large margin at any non-zero flip rate, acting as a "
+        r"corruption tripwire even where accuracy barely moves. Mean "
+        r"softmax confidence tracks the flip rate because cross-entropy on "
+        r"flipped labels converges to the label purity, but reading it "
+        r"requires a clean labelled test set, and a moderate value is "
+        r"indistinguishable from a merely difficult task. "
+        r"$\Delta_{\mathrm{rel}}$: relative drop vs.\ the $p{=}0$ model; "
+        r"$r$/$\rho$: Pearson/Spearman correlation with test accuracy.}",
         rf"\label{{tab:model-trust-{dataset}}}",
-        r"\begin{tabular}{cccccc}",
+        r"\begin{tabular}{cccccccc}",
         r"\toprule",
         r"$p$ & Test acc.\ (\%) & Mean conf. & PaTAS trust & "
-        r"PaTAS trust (norm.) & Mean path trust \\",
+        r"PaTAS trust (norm.) & Mean path trust & "
+        r"$\Delta_{\mathrm{rel}}$ trust (\%) & "
+        r"$\Delta_{\mathrm{rel}}$ conf.\ (\%) \\",
         r"\midrule",
     ]
     for r in rows:
         lines.append(
             f"{r['rate']:g} & {_f(r['test_acc']*100, '{:.2f}')} & "
             f"{_f(r['mean_conf'])} & {_f(r['ff_trust'])} & "
-            f"{_f(r['ff_trust_norm'])} & {_f(r['mean_path_trust'])} \\\\")
+            f"{_f(r['ff_trust_norm'])} & {_f(r['mean_path_trust'])} & "
+            f"{_f(r['trust_drop_rel']*100, '{:.1f}')} & "
+            f"{_f(r['conf_drop_rel']*100, '{:.1f}')} \\\\")
     c = correlations
     lines += [
         r"\midrule",
         rf"$r$ (vs.\ acc.) & — & {_f(c['mean_conf']['pearson'])} & "
         rf"{_f(c['ff_trust']['pearson'])} & {_f(c['ff_trust_norm']['pearson'])} & "
-        rf"{_f(c['mean_path_trust']['pearson'])} \\",
+        rf"{_f(c['mean_path_trust']['pearson'])} & — & — \\",
         rf"$\rho$ (vs.\ acc.) & — & {_f(c['mean_conf']['spearman'])} & "
         rf"{_f(c['ff_trust']['spearman'])} & {_f(c['ff_trust_norm']['spearman'])} & "
-        rf"{_f(c['mean_path_trust']['spearman'])} \\",
+        rf"{_f(c['mean_path_trust']['spearman'])} & — & — \\",
         r"\bottomrule",
         r"\end{tabular}",
         r"\end{table}",
@@ -309,6 +341,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     rows = [eval_rate(dataset, float(r), args) for r in sorted(set(args.rates))]
+    add_margins(rows)
 
     acc = [r["test_acc"] for r in rows]
     correlations = {
@@ -318,12 +351,16 @@ def main():
     }
 
     print(f"\n  {'p':>5} {'acc':>8} {'conf':>8} {'ff_trust':>9} "
-          f"{'ff_norm':>8} {'path':>8}")
-    print("  " + "-" * 52)
+          f"{'ff_norm':>8} {'path':>8} {'Δtrust%':>8} {'Δconf%':>8}")
+    print("  " + "-" * 70)
     for r in rows:
         print(f"  {r['rate']:>5g} {r['test_acc']*100:7.2f}% "
               f"{r['mean_conf']:8.4f} {r['ff_trust']:9.4f} "
-              f"{r['ff_trust_norm']:8.4f} {r['mean_path_trust']:8.4f}")
+              f"{r['ff_trust_norm']:8.4f} {r['mean_path_trust']:8.4f} "
+              f"{r['trust_drop_rel']*100:7.1f}% {r['conf_drop_rel']*100:7.1f}%")
+    print("\n  Detection margin: PaTAS trust reads from training dynamics "
+          "alone (no test data);\n  mean confidence needs a clean labelled "
+          "test set. Δ% = relative drop vs. the p=0 model.")
     print("\n  Correlation with test accuracy across rates "
           "(Pearson / Spearman):")
     for key, c in correlations.items():
