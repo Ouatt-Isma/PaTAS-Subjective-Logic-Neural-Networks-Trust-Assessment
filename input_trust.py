@@ -50,7 +50,13 @@ class InputTrustModel:
         Prevents near-constant features (MNIST background) from producing
         infinite z on the smallest perturbation while still flagging them
         quickly — they are exactly the features where corruption is most
-        detectable.
+        detectable.  The default 0.02 keeps a uniform noise bump of
+        magnitude ≥ ~6 % of the feature span on a near-constant feature
+        far outside the slack zone (strong distrust) while ≤ 1σ of real
+        training variation stays fully conforming; the earlier 0.05
+        default let about half of the ±0.3·span corruption bumps land
+        inside the slack zone, compressing the clean-vs-corrupted
+        separation to a few percent.
     slack : float
         Deviations up to ``slack`` standard deviations are considered fully
         conforming (g = 1), so in-distribution variation between samples is
@@ -66,7 +72,7 @@ class InputTrustModel:
         Base rate a used for projected probability p = b + a·u.
     """
 
-    def __init__(self, floor_frac: float = 0.05, slack: float = 1.0,
+    def __init__(self, floor_frac: float = 0.02, slack: float = 1.0,
                  evidence: float = 50.0, W: float = 2.0,
                  base_rate: float = 0.5):
         if floor_frac <= 0:

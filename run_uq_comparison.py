@@ -2,17 +2,23 @@
 
 Compares, on the clean-data (trust/trust) model of each dataset:
 
-    * PaTAS filter    — belief-anchored trust-discounted confidence.  Each
-                        test sample gets a per-feature input trust opinion
-                        from its conformity to the training-data statistics
-                        (input_trust.InputTrustModel — same BPQ evidence
-                        mapping PaTAS uses for weight opinions), which is
-                        propagated through the sample's activation-path
-                        IPTA built from the cached PaTAS opinion matrices
-                        (omega_arrays.pkl).  The propagated opinion of the
-                        predicted class yields the path trust P = b + a·u,
-                        and the filter score is the SL-discounted
-                        confidence with class-prior base rate:
+    * PaTAS filter    — belief-anchored trust-discounted confidence from
+                        two per-sample trust sources: the model-side trust
+                        of the sample's activation-path IPTA (built from
+                        the cached PaTAS opinion matrices,
+                        omega_arrays.pkl, evaluated under a fully trusted
+                        input) and the input-side trust of the sample
+                        itself (per-feature conformity to training-data
+                        statistics via input_trust.InputTrustModel — the
+                        same BPQ evidence mapping PaTAS uses for weight
+                        opinions).  By default the two combine by serial
+                        SL trust discounting, P = P_model · P_input
+                        (--patas-score propagated instead pushes the
+                        per-feature opinions through the IPTA feedforward —
+                        kept as an ablation, since the averaging inside the
+                        opinion matmul compresses the input signal), and
+                        the filter score is the SL-discounted confidence
+                        with class-prior base rate:
 
                             score = P · conf + (1 − P) / K
 
@@ -22,10 +28,10 @@ Compares, on the clean-data (trust/trust) model of each dataset:
                         constant fully-trusted input (which made the PaTAS
                         score a constant rescaling of softmax — identical
                         AUROC/AURC by construction) is available as an
-                        ablation via --patas-input-trust constant; the raw
-                        path trust, the model-side trust under a trusted
-                        input, and the input-side sample trust are all kept
-                        as diagnostics in scores.npz.
+                        ablation via --patas-input-trust constant; the
+                        trust factor and its model-side and input-side
+                        components are all kept as diagnostics in
+                        scores.npz.
     * Softmax filter  — max softmax probability of the base network
     * MC Dropout      — Gal & Ghahramani (2016), T stochastic passes
     * EDL             — Sensoy et al. (NeurIPS 2018), Dirichlet MSE loss
@@ -337,34 +343,53 @@ def _discounted_confidence(trust: np.ndarray, conf: np.ndarray,
 
 
 def patas_ipta_scores(ptas, base_nn, X: np.ndarray, input_dim: int,
-                      itm: Optional[InputTrustModel] = None) -> dict:
+                      itm: Optional[InputTrustModel] = None,
+                      score_mode: str = "serial") -> dict:
     """Per-sample PaTAS filter: belief-anchored trust-discounted confidence.
 
-    For each sample, the sample's own per-feature input trust opinions
-    (conformity to training statistics via ``itm``; the constant
-    fully-trusted opinion when ``itm`` is None — the historical ablation)
-    are propagated through the IPTA of the sample's activation path.  The
-    propagated opinion of the predicted class gives the path trust
-    P = b + u/2, and the filter score is the SL-discounted confidence with
-    class-prior base rate (see _discounted_confidence).
+    Two trust sources are combined per sample:
+      * model-side — the trust opinion of the sample's activation-path IPTA
+        under a fully trusted input (how much the trained computation path
+        is trusted), P_model = b + u/2;
+      * input-side — the sample's conformity to the training-data
+        statistics via ``itm`` (how much the input itself is trusted),
+        P_input = b̄ + u̅/2 of the per-feature opinions.
+
+    ``score_mode`` selects how they combine into the trust factor P:
+      * "serial" (default): P = P_model · P_input — classic serial SL trust
+        discounting of two independent sources, same semantics as the conv
+        (CIFAR-10) fallback.  Preserves the full strength of the input
+        signal (the propagated variant averages the per-feature opinions
+        across all inputs inside TensorArrayTO.dot, which compresses
+        clean-vs-corrupted differences, strongly so on low-weight-trust
+        models).
+      * "propagated": P is the projected probability of the predicted
+        class's opinion after propagating the per-feature input opinions
+        through the IPTA — the pure propagation variant, kept for the
+        ablation.
+
+    With ``itm=None`` both modes reduce to the historical constant
+    fully-trusted input (P = P_model).  The filter score is the
+    SL-discounted confidence with class-prior base rate
+    (see _discounted_confidence).
 
     Returns dict with:
         score       : (n,) the PaTAS filter score
-        trust       : (n,) propagated path trust P under the sample's input
-                       opinion (input- and model-side combined)
+        trust       : (n,) the trust factor P actually used for the score
         conf        : (n,) softmax confidence of the base network
-        model_trust : (n,) path trust under a fully-trusted input — the
-                       model-side component alone (diagnostic; equals
-                       'trust' when itm is None)
-        input_trust : (n,) input-side sample trust from itm alone
-                       (diagnostic; NaN when itm is None)
+        model_trust : (n,) model-side path trust P_model (diagnostic)
+        input_trust : (n,) input-side sample trust P_input (diagnostic;
+                       NaN when itm is None)
     """
     from concrete.TensorTO import TensorArrayTO, fill as tfill
     from tqdm import tqdm
 
+    if score_mode not in ("serial", "propagated"):
+        raise ValueError(f"unknown score_mode: {score_mode!r}")
     n_classes = int(ptas.structure[-1])
     Tx_const = TensorArrayTO(tfill((1, input_dim), method="trust"))
-    input_ops = itm.opinions(X) if itm is not None else None
+    propagate_input = itm is not None and score_mode == "propagated"
+    input_ops = itm.opinions(X) if propagate_input else None
     input_trust = (itm.sample_trust(X) if itm is not None
                    else np.full(len(X), np.nan))
     trust = np.full(len(X), np.nan)
@@ -377,17 +402,19 @@ def patas_ipta_scores(ptas, base_nn, X: np.ndarray, input_dim: int,
             with contextlib.redirect_stdout(silent):
                 probs, path = base_nn.forward(X[i:i + 1], getactivated=True)
                 ipta = ptas.GenIPTA(path)
-                if input_ops is not None:
-                    Ty = ipta(TensorArrayTO(input_ops[i:i + 1]))   # (1, K, 3)
-                    Ty_m = ipta(Tx_const)
-                else:
-                    Ty = ipta(Tx_const)
-                    Ty_m = Ty
+                Ty_m = ipta(Tx_const)
+                Ty = (ipta(TensorArrayTO(input_ops[i:i + 1]))
+                      if propagate_input else Ty_m)          # (1, K, 3)
             pred = int(np.argmax(probs, axis=1)[0])
-            op = np.asarray(Ty.to_numpy())[0, pred]        # [b, d, u]
-            op_m = np.asarray(Ty_m.to_numpy())[0, pred]
-            trust[i] = float(op[0] + 0.5 * op[2])          # projected prob
+            op_m = np.asarray(Ty_m.to_numpy())[0, pred]      # [b, d, u]
             model_trust[i] = float(op_m[0] + 0.5 * op_m[2])
+            if propagate_input:
+                op = np.asarray(Ty.to_numpy())[0, pred]
+                trust[i] = float(op[0] + 0.5 * op[2])
+            elif itm is not None:                            # serial
+                trust[i] = model_trust[i] * float(input_trust[i])
+            else:
+                trust[i] = model_trust[i]
             conf[i] = float(np.max(probs))
         except Exception:                                   # noqa: BLE001
             n_fail += 1
@@ -650,7 +677,8 @@ def score_all_methods(Xn, ys, dataset, arch, cfgd, args, is_conv,
                                       itm=itm, X=Xn)
     elif ptas is not None:
         t0 = time.time()
-        sc = patas_ipta_scores(ptas, base, Xn, cfgd["input_dim"], itm=itm)
+        sc = patas_ipta_scores(ptas, base, Xn, cfgd["input_dim"], itm=itm,
+                               score_mode=args.patas_score)
         print(f"  PaTAS IPTA scoring: {time.time()-t0:.1f}s "
               f"({int(np.isnan(sc['score']).sum())} failures)  "
               f"mean trust={np.nanmean(sc['trust']):.4f}  "
@@ -732,7 +760,8 @@ def run_condition(dataset: str, cond: TrainCondition, args) -> dict:
           f"  test conditions: clean + feature noise p ∈ "
           f"{[p for p in noise_levels if p > 0]}"
           f"{' + mixed batch' if with_mixed else ''}\n"
-          f"  PaTAS input trust: {args.patas_input_trust}\n{'='*70}")
+          f"  PaTAS input trust: {args.patas_input_trust}  "
+          f"score mode: {args.patas_score}\n{'='*70}")
 
     x_how = TRUST_TO_DATASET.get(cond.x_trust, "clean")
     y_how = TRUST_TO_DATASET.get(cond.y_trust, "clean")
@@ -916,6 +945,7 @@ def run_condition(dataset: str, cond: TrainCondition, args) -> dict:
                    "epochs": args.epochs, "subset": n_sub,
                    "mc_passes": args.mc_passes, "dropout": args.dropout,
                    "patas_input_trust": args.patas_input_trust,
+                   "patas_score": args.patas_score,
                    "itm": (None if itm is None else
                            {"floor_frac": itm.floor_frac, "slack": itm.slack,
                             "evidence": itm.evidence, "span": itm.span}),
@@ -981,21 +1011,33 @@ def parse_args():
                         "level pooled 1:1)")
     p.add_argument("--patas-input-trust",
                    choices=["conformity", "constant"], default="conformity",
-                   help="Input opinion fed into the per-sample IPTA: "
+                   help="Input opinion for the PaTAS trust factor: "
                         "'conformity' (default) builds per-feature opinions "
                         "from each sample's conformity to the training-data "
                         "statistics; 'constant' reproduces the historical "
                         "fully-trusted input (ablation: the PaTAS score then "
                         "carries no per-sample input information)")
+    p.add_argument("--patas-score",
+                   choices=["serial", "propagated"], default="serial",
+                   help="How model-side and input-side trust combine: "
+                        "'serial' (default) multiplies the IPTA path trust "
+                        "by the input-conformity trust (serial SL "
+                        "discounting, full-strength input signal, same "
+                        "semantics as the CIFAR-10 class-level fallback); "
+                        "'propagated' pushes the per-feature opinions "
+                        "through the IPTA feedforward instead (ablation — "
+                        "the averaging inside the opinion matmul compresses "
+                        "the input signal)")
     p.add_argument("--itm-evidence", dest="itm_evidence", type=float, default=50.0,
                    help="Input-trust evidence mass N per feature (default 50; "
                         "per-feature uncertainty is W/(N+W))")
     p.add_argument("--itm-slack", dest="itm_slack", type=float, default=1.0,
                    help="Deviations up to this many σ count as fully "
                         "conforming (default 1.0)")
-    p.add_argument("--itm-floor-frac", dest="itm_floor_frac", type=float, default=0.05,
+    p.add_argument("--itm-floor-frac", dest="itm_floor_frac", type=float, default=0.02,
                    help="Per-feature σ floor as a fraction of the feature "
-                        "span (default 0.05)")
+                        "span (default 0.02; larger values blunt corruption "
+                        "detection on near-constant features)")
     p.add_argument("--label-noise", type=float, nargs="*", default=[0.3],
                    help="Train-time label-flip rates: for each value, a "
                         "second set of models is trained on label-noised "
