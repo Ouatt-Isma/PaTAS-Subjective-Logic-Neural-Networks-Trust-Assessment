@@ -74,14 +74,12 @@ _DEFAULT_EPOCHS = 20
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _resnet_paths(x_trust: str, y_trust: str, epsilon_low: float) -> tuple[str, str]:
-    """(PTAS_Eval dir, NN_Train dir) for a ResNet-lite scenario — same naming
-    scheme as start_ptas / start_client, with 'resnet-lite' as the arch string."""
-    ptas_dir = (
-        f"results/PTAS_Eval_mnist_resnet-lite_{x_trust}_{y_trust}"
-        f"_eps_{epsilon_low}_PathSize_None"
-    )
-    nn_dir = f"results/NN_Train_mnist_resnet-lite_{x_trust}_{y_trust}_PathSize_None"
-    return ptas_dir, nn_dir
+    """(PTAS_Eval dir, NN_Train dir) for a ResNet-lite scenario — delegates
+    to the canonical helpers in patas_module/main.py ('resnet-lite' as the
+    arch string) so the naming can never drift."""
+    from main import nn_cache_dir, ptas_cache_dir
+    return (ptas_cache_dir("mnist", "resnet-lite", x_trust, y_trust, epsilon_low),
+            nn_cache_dir("mnist", "resnet-lite", x_trust, y_trust))
 
 
 def _resnet_ptas_worker(result_queue, ready_event, port, x_trust, y_trust,

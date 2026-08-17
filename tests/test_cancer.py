@@ -226,10 +226,10 @@ def _client_worker(cfg: TestCaseConfig, result_queue: "multiprocessing.Queue[dic
     """
     try:
         start_client(cfg, not_ptas=False, force_retrain=force_retrain)
-        datapath = (
-            f"results/NN_Train_{cfg.dataset}_{cfg.hidden_dim}"
-            f"_{cfg.x_trust}_{cfg.y_trust}_PathSize_None"
-        )
+        from main import nn_cache_dir
+        datapath = nn_cache_dir(cfg.dataset, str(cfg.hidden_dim),
+                                cfg.x_trust, cfg.y_trust,
+                                noise_level=cfg.noise_level)
         metrics = _read_metrics(os.path.join(datapath, "metrics.txt"))
         result_queue.put(metrics)
     except Exception as exc:
@@ -582,10 +582,10 @@ def test_cancer_baseline_no_ptas():
     def _no_ptas_client(cfg_inner, q):
         try:
             start_client(cfg_inner, not_ptas=True)
-            dp = (
-                f"results/NN_Train_{cfg_inner.dataset}_{cfg_inner.hidden_dim}"
-                f"_{cfg_inner.x_trust}_{cfg_inner.y_trust}_PathSize_None"
-            )
+            from main import nn_cache_dir
+            dp = nn_cache_dir(cfg_inner.dataset, str(cfg_inner.hidden_dim),
+                              cfg_inner.x_trust, cfg_inner.y_trust,
+                              noise_level=cfg_inner.noise_level)
             q.put(_read_metrics(os.path.join(dp, "metrics.txt")))
         except Exception as exc:
             q.put({"train_acc": float("nan"), "error": str(exc)})
