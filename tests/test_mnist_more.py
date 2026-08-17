@@ -302,7 +302,7 @@ def run_all_scenarios(epochs: int = _DEFAULT_EPOCHS,
             time.sleep(2)
 
     if not skip_resnet:
-        print(f"\n  ► arch=resnet-lite (conv PaTAS prototype)  x=trust  y=trust")
+        print("\n  ► arch=resnet-lite (conv PaTAS prototype)  x=trust  y=trust")
         result = run_resnet_scenario(epochs=epochs, port=base_port + 10,
                                      epsilon_low=epsilon_low)
         print(f"    trust_mass={result['trust_mass']:.4f}  "
@@ -311,7 +311,7 @@ def run_all_scenarios(epochs: int = _DEFAULT_EPOCHS,
               f"test={result['test_acc']*100:.2f}%")
         results.append(result)
 
-        print(f"\n  ► arch=resnet-lite (conv PaTAS prototype)  x=vacuous  y=vacuous")
+        print("\n  ► arch=resnet-lite (conv PaTAS prototype)  x=vacuous  y=vacuous")
         result = run_resnet_scenario(epochs=epochs, port=base_port + 10,
                                      epsilon_low=epsilon_low, x_trust="vacuous", y_trust="vacuous")
         print(f"    trust_mass={result['trust_mass']:.4f}  "

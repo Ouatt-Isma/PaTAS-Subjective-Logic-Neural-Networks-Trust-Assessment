@@ -789,19 +789,33 @@ def compute_metrics(results: dict, calibrators: Optional[dict] = None) -> dict:
     return metrics
 
 
-def run_condition(dataset: str, cond: TrainCondition, args) -> dict:
+def _uq_out_dir(dataset: str, arch, cond: TrainCondition, args) -> str:
+    """Canonical output dir for one (dataset, training condition) — variant
+    runs (--out-tag) and multi-seed replicates get their own suffixes so
+    they never overwrite the main paper tables."""
+    d = f"results/UQ_Compare_{dataset}_{_arch_str(arch)}"
+    if cond.tag:
+        d += f"_{cond.tag}"
+    if getattr(args, "out_tag", ""):
+        d += f"_{args.out_tag}"
+    return d
+
+
+def run_condition(dataset: str, cond: TrainCondition, args,
+                  out_suffix: str = "") -> dict:
     """Run the full filter comparison for one *training* condition (clean
     data, or train-time label noise), evaluated across every *test* noise
-    condition (clean + --test-noise feature corruption)."""
+    condition (clean + --test-noise feature corruption + mixed + OOD).
+
+    Returns {"metrics": {tag: {method: metrics}}, "ood": ood_metrics}.
+    ``out_suffix`` separates output dirs of multi-seed replicates."""
     from NN.datasets import load_data
     from main import TRUST_TO_DATASET
     from uq_methods import apply_feature_noise, plot_metrics_vs_noise
 
     cfgd = DATASET_CFG[dataset]
     arch = cfgd["arch"]
-    out_dir = f"results/UQ_Compare_{dataset}_{_arch_str(arch)}"
-    if cond.tag:
-        out_dir += f"_{cond.tag}"
+    out_dir = _uq_out_dir(dataset, arch, cond, args) + out_suffix
     os.makedirs(out_dir, exist_ok=True)
 
     noise_levels = sorted(set(float(p) for p in args.test_noise) | {0.0})
@@ -1085,16 +1099,176 @@ def run_condition(dataset: str, cond: TrainCondition, args) -> dict:
                    "metrics": metrics_by_tag},
                   fh, indent=2)
     print(f"  Saved {out_dir}/summary.json")
-    return metrics_by_tag
+    return {"metrics": metrics_by_tag, "ood": ood_metrics}
+
+
+# ---------------------------------------------------------------------------
+# Multi-seed aggregation (mean ± std over evaluation replicates)
+# ---------------------------------------------------------------------------
+
+_TAG_LABELS = {"clean": "Clean test data", "mixed": "Mixed batch (1:1)"}
+
+
+def _tag_label(tag: str) -> str:
+    if tag.startswith("noise"):
+        return f"Feature noise $p={tag[len('noise'):]}$"
+    return _TAG_LABELS.get(tag, tag)
+
+
+def _mean_std(values):
+    vals = [v for v in values
+            if v is not None and np.isfinite(v)]
+    if not vals:
+        return None, None
+    return float(np.mean(vals)), float(np.std(vals))
+
+
+def _fmt_pm(mean, std, fmt="{:.3f}"):
+    if mean is None:
+        return "—"
+    return f"{fmt.format(mean)} $\\pm$ {fmt.format(std)}"
+
+
+def aggregate_seed_outputs(dataset: str, cond: TrainCondition, seeds: list,
+                           per_seed: list, args) -> None:
+    """Aggregate the per-seed run_condition outputs into mean ± std tables
+    in the canonical (suffix-free) output dir.  Seeds vary only the
+    evaluation draws — test/calibration subsets, noise masks, MC-dropout
+    sampling — over the same trained models, so the spread quantifies
+    evaluation variance."""
+    cfgd = DATASET_CFG[dataset]
+    arch = cfgd["arch"]
+    out_dir = _uq_out_dir(dataset, arch, cond, args)
+    os.makedirs(out_dir, exist_ok=True)
+
+    label_map = {
+        "patas":      "PaTAS filter (ours)",
+        "softmax":    "Softmax filter",
+        "mc_dropout": "MC Dropout~\\cite{gal2016dropout}",
+        "edl":        "EDL~\\cite{sensoy2018evidential}",
+    }
+    metric_cols = [("test_acc", 100.0, "{:.2f}"), ("auroc", 1.0, "{:.3f}"),
+                   ("aurc", 1.0, "{:.3f}"), ("ece", 1.0, "{:.3f}"),
+                   ("ece_calib", 1.0, "{:.3f}")]
+
+    tags = list(per_seed[0]["metrics"].keys())
+    agg: dict = {}
+    lines = [
+        r"\begin{table}[ht]",
+        r"\centering",
+        r"\caption{Selective-prediction quality and calibration on "
+        + dataset.upper() + r" (models trained on: " + cond.label + r"), "
+        r"mean $\pm$ std over " + str(len(seeds)) + r" evaluation seeds "
+        r"(seeds vary the test/calibration subsets, corruption draws and "
+        r"MC-Dropout sampling over the same trained models). Metrics as in "
+        r"the single-seed table.}",
+        rf"\label{{tab:uq-comparison-{dataset}"
+        rf"{'-' + cond.tag if cond.tag else ''}-seeds}}",
+        r"\begin{tabular}{lccccc}",
+        r"\toprule",
+        r"Method & Accuracy (\%) & AUROC $\uparrow$ & AURC $\downarrow$ & "
+        r"ECE $\downarrow$ & ECE$_{\text{cal}}$ $\downarrow$ \\",
+    ]
+    print(f"\n  ══ aggregate over seeds {seeds} — {cond.label} ══")
+    for tag in tags:
+        lines += [r"\midrule",
+                  rf"\multicolumn{{6}}{{l}}{{\textit{{{_tag_label(tag)}}}}} \\"]
+        print(f"  ── {_tag_label(tag)}")
+        methods = per_seed[0]["metrics"][tag].keys()
+        for method in methods:
+            cells = []
+            agg_m = {}
+            for key, scale, fmt in metric_cols:
+                mean, std = _mean_std(
+                    [ps["metrics"].get(tag, {}).get(method, {}).get(key)
+                     for ps in per_seed])
+                agg_m[key] = {"mean": mean, "std": std}
+                cells.append(_fmt_pm(
+                    None if mean is None else mean * scale,
+                    None if std is None else std * scale, fmt))
+            agg.setdefault(tag, {})[method] = agg_m
+            if method in label_map:
+                lines.append(f"{label_map[method]} & " + " & ".join(cells) + r" \\")
+            au = agg_m["auroc"]
+            print(f"    {method:<12} AUROC {au['mean']:.3f}±{au['std']:.3f}"
+                  if au["mean"] is not None else f"    {method:<12} AUROC —")
+    lines += [r"\bottomrule", r"\end{tabular}", r"\end{table}"]
+    tex_path = os.path.join(out_dir, "ece_table_agg.tex")
+    with open(tex_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines))
+    print(f"  Saved {tex_path}")
+
+    ood_agg = None
+    if any(ps.get("ood") for ps in per_seed):
+        ood_agg = {}
+        methods = next(ps["ood"] for ps in per_seed if ps.get("ood")).keys()
+        for method in methods:
+            ood_agg[method] = {}
+            for key in ("auroc", "fpr_at_95tpr", "mean_score_id",
+                        "mean_score_ood"):
+                mean, std = _mean_std(
+                    [(ps.get("ood") or {}).get(method, {}).get(key)
+                     for ps in per_seed])
+                ood_agg[method][key] = {"mean": mean, "std": std}
+        olines = [
+            r"\begin{table}[ht]", r"\centering",
+            r"\caption{OOD detection on " + dataset.upper() +
+            r" (models trained on: " + cond.label + r"), mean $\pm$ std "
+            r"over " + str(len(seeds)) + r" evaluation seeds; setup as in "
+            r"the single-seed OOD table.}",
+            rf"\label{{tab:ood-{dataset}"
+            rf"{'-' + cond.tag if cond.tag else ''}-seeds}}",
+            r"\begin{tabular}{lcccc}", r"\toprule",
+            r"Method & AUROC $\uparrow$ & FPR@95\%TPR $\downarrow$ & "
+            r"Mean score (ID) & Mean score (OOD) \\", r"\midrule",
+        ]
+        for method in ("patas", "softmax", "mc_dropout", "edl"):
+            if method not in ood_agg:
+                continue
+            m = ood_agg[method]
+            olines.append(
+                f"{label_map[method]} & "
+                + " & ".join(_fmt_pm(m[k]["mean"], m[k]["std"])
+                             for k in ("auroc", "fpr_at_95tpr",
+                                       "mean_score_id", "mean_score_ood"))
+                + r" \\")
+        olines += [r"\bottomrule", r"\end{tabular}", r"\end{table}"]
+        ood_path = os.path.join(out_dir, "ood_table_agg.tex")
+        with open(ood_path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(olines))
+        print(f"  Saved {ood_path}")
+
+    with open(os.path.join(out_dir, "summary_agg.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump({"dataset": dataset, "arch": _arch_str(arch),
+                   "seeds": seeds,
+                   "train_condition": {"tag": cond.tag, "label": cond.label},
+                   "metrics": agg, "ood": ood_agg}, fh, indent=2)
+    print(f"  Saved {out_dir}/summary_agg.json")
 
 
 def run(dataset: str, args) -> dict:
     """Run every training condition (clean + train-time label noise) for one
-    dataset and return {condition_tag: metrics_by_test_noise}."""
+    dataset; with --seeds, replicate each condition per seed and write
+    aggregated mean ± std tables alongside the per-seed outputs."""
     conditions = [CLEAN_CONDITION] + [label_noise_condition(p)
                                       for p in args.label_noise]
-    return {cond.tag or "clean": run_condition(dataset, cond, args)
-            for cond in conditions}
+    seeds = list(args.seeds) if args.seeds else [args.seed]
+    out: dict = {}
+    for cond in conditions:
+        if len(seeds) == 1:
+            args.seed = seeds[0]
+            out[cond.tag or "clean"] = run_condition(dataset, cond, args)
+            continue
+        per_seed = []
+        for s in seeds:
+            args.seed = s
+            print(f"\n{'#'*70}\n#  seed {s}  —  {cond.label}\n{'#'*70}")
+            per_seed.append(run_condition(dataset, cond, args,
+                                          out_suffix=f"_seed{s}"))
+        aggregate_seed_outputs(dataset, cond, seeds, per_seed, args)
+        out[cond.tag or "clean"] = per_seed
+    return out
 
 
 def parse_args():
@@ -1192,6 +1366,18 @@ def parse_args():
                         "models (default: 0.3; pass --label-noise with no "
                         "values to disable)")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seeds", type=int, nargs="+", default=None,
+                   help="Run the whole evaluation once per seed and write "
+                        "aggregated mean±std tables (ece_table_agg.tex, "
+                        "ood_table_agg.tex, summary_agg.json) next to the "
+                        "per-seed outputs (dirs suffixed _seed<k>). Seeds "
+                        "vary only the evaluation draws — subsets, noise "
+                        "masks, MC sampling — over the same trained models, "
+                        "so no retraining happens between seeds.")
+    p.add_argument("--out-tag", default="",
+                   help="Suffix for the UQ_Compare output dirs (e.g. an "
+                        "ablation name) so variant runs never overwrite "
+                        "the main results")
     p.add_argument("--train-missing", action="store_true",
                    help="Train any missing base/PaTAS caches instead of failing")
     p.add_argument("--force-retrain", action="store_true",
