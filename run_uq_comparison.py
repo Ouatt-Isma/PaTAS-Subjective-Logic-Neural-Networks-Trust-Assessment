@@ -1014,18 +1014,28 @@ def run_condition(dataset: str, cond: TrainCondition, args,
                   "cifar10gray": ("CIFAR-10 (grayscale)", 32 * 32)}
     ood_metrics: Optional[dict] = None
     if ood_name != "none" and results_clean is not None:
+        from uq_methods import fpr_at_tpr
         ood_label, ood_dim = _OOD_SPECS[ood_name]
+        X_ood_full = None
         if ood_dim != cfgd["input_dim"]:
             print(f"  [OOD] {ood_label} ({ood_dim}) does not match "
                   f"{dataset}'s input dim ({cfgd['input_dim']}) — skipped.")
         else:
-            from uq_methods import fpr_at_tpr
-            if ood_name == "fashion":
-                from NN.datasets import load_fashion_mnist_test
-                X_ood_full = load_fashion_mnist_test()[0]
-            else:
-                from NN.datasets import load_cifar10_gray_test
-                X_ood_full = load_cifar10_gray_test()
+            try:
+                if ood_name == "fashion":
+                    from NN.datasets import load_fashion_mnist_test
+                    X_ood_full = load_fashion_mnist_test()[0]
+                else:
+                    from NN.datasets import load_cifar10_gray_test
+                    X_ood_full = load_cifar10_gray_test()
+            except Exception as exc:                        # noqa: BLE001
+                # Typically: compute node without internet and no warmed
+                # data/ cache. Skip OOD instead of killing the whole run.
+                print(f"  [OOD] Could not load {ood_label}: {exc}\n"
+                      f"        Warm the data/ cache from a login node "
+                      f"(see NN.datasets.load_fashion_mnist_test docstring) "
+                      f"— skipping OOD detection.")
+        if X_ood_full is not None:
             n_ood = min(n_sub, len(X_ood_full))
             ood_idx = np.sort(rng.choice(len(X_ood_full), size=n_ood,
                                          replace=False))
