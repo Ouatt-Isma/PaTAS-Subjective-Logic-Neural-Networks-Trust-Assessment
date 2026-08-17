@@ -41,12 +41,16 @@ Compares, on the clean-data (trust/trust) model of each dataset:
 
 Every method is evaluated on the clean test set, under test-time feature
 noise (--test-noise, default p ∈ {0.3, 0.6}; Bernoulli-uniform corruption
-scaled to the feature range, labels stay clean), AND on a mixed batch
+scaled to the feature range, labels stay clean), on a mixed batch
 (clean + strongest noise level pooled 1:1 — the deployment setting where a
 filter must down-rank corrupted inputs that softmax stays confident on;
-disable with --no-mixed).  This whole battery is additionally repeated for
-models TRAINED under label noise (--label-noise, default flip rate 0.3:
-clean features, labels flipped with probability p via
+disable with --no-mixed), AND as an out-of-distribution detector
+(--ood-dataset, default auto: FashionMNIST for MNIST, grayscale CIFAR-10
+for GTSRB, pushed through the identical ID preprocessing; each method's
+own score is the ID-vs-OOD discriminator, reported as AUROC / FPR@95%TPR
+in ood_table.tex + roc_ood.pdf).  This whole battery is additionally
+repeated for models TRAINED under label noise (--label-noise, default flip
+rate 0.3: clean features, labels flipped with probability p via
 NN.datasets.noised_label / y_trust='vacuous') alongside the default
 clean-trained models — the case where PaTAS's model-side trust diverges
 from softmax, which stays confident regardless of how the network was
@@ -640,6 +644,54 @@ def write_tex_table(conditions: list, dataset: str, out_path: str,
     print(f"  Saved {out_path}")
 
 
+def write_ood_tex_table(ood_metrics: dict, dataset: str, ood_label: str,
+                        out_path: str, train_label: str = "Clean training data",
+                        train_tag: str = "") -> None:
+    """OOD-detection table: each method's own confidence/trust score used
+    directly as an ID-vs-OOD discriminator (no OOD data seen at training)."""
+    def _f(v, fmt="{:.3f}"):
+        return fmt.format(v) if v is not None and np.isfinite(v) else "—"
+
+    label_map = {
+        "patas":      "PaTAS filter (ours)",
+        "softmax":    "Softmax filter",
+        "mc_dropout": "MC Dropout~\\cite{gal2016dropout}",
+        "edl":        "EDL~\\cite{sensoy2018evidential}",
+    }
+    lines = [
+        r"\begin{table}[ht]",
+        r"\centering",
+        r"\caption{Out-of-distribution detection: in-distribution = clean "
+        + dataset.upper() + r" test data, OOD = " + ood_label +
+        r" (models trained on: " + train_label + r"; no method sees OOD "
+        r"data before evaluation — each method's own confidence/trust "
+        r"score is used directly as the ID-vs-OOD discriminator). AUROC "
+        r"higher is better; FPR@95\%TPR is the false-positive rate at the "
+        r"threshold that still accepts 95\% of in-distribution inputs, "
+        r"lower is better. Mean scores show WHERE the separation comes "
+        r"from: a trustworthy filter should assign clearly lower scores "
+        r"to inputs from a foreign distribution.}",
+        rf"\label{{tab:ood-{dataset}{'-' + train_tag if train_tag else ''}}}",
+        r"\begin{tabular}{lcccc}",
+        r"\toprule",
+        r"Method & AUROC $\uparrow$ & FPR@95\%TPR $\downarrow$ & "
+        r"Mean score (ID) & Mean score (OOD) \\",
+        r"\midrule",
+    ]
+    for method in ("patas", "softmax", "mc_dropout", "edl"):
+        if method not in ood_metrics:
+            continue
+        m = ood_metrics[method]
+        lines.append(
+            f"{label_map[method]} & {_f(m.get('auroc'))} & "
+            f"{_f(m.get('fpr_at_95tpr'))} & {_f(m.get('mean_score_id'))} & "
+            f"{_f(m.get('mean_score_ood'))} \\\\")
+    lines += [r"\bottomrule", r"\end{tabular}", r"\end{table}"]
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines))
+    print(f"  Saved {out_path}")
+
+
 # ---------------------------------------------------------------------------
 # Main per-dataset run
 # ---------------------------------------------------------------------------
@@ -791,7 +843,9 @@ def run_condition(dataset: str, cond: TrainCondition, args) -> dict:
     if args.patas_input_trust == "conformity":
         itm = InputTrustModel(floor_frac=args.itm_floor_frac,
                               slack=args.itm_slack,
-                              evidence=args.itm_evidence).fit(X_train)
+                              evidence=args.itm_evidence,
+                              alpha=args.itm_alpha,
+                              weight_cap=args.itm_weight_cap).fit(X_train)
         print(f"  [PaTAS] {itm.describe()}")
 
     # ---- Models (trained under this condition, loaded/trained once) --------
@@ -899,12 +953,15 @@ def run_condition(dataset: str, cond: TrainCondition, args) -> dict:
     metrics_by_noise: dict = {}      # float-keyed subset for the noise plot
     npz_payload = {"idx": idx, "y": ys, "calib_idx": calib_idx}
 
+    results_clean: Optional[dict] = None
     for tag, cond_lbl, nl, Xn, yn in test_conditions:
         print(f"\n  ── test condition: {cond_lbl} " + "─" * 40)
 
         results = score_all_methods(Xn, yn, dataset, arch, cfgd, args, is_conv,
                                     base, ptas, mc_model, edl_model, cond,
                                     itm=itm)
+        if tag == "clean":
+            results_clean = results
         metrics = compute_metrics(results, calibrators)
         metrics_by_tag[tag] = metrics
         tex_conditions.append((tag, cond_lbl, metrics))
@@ -930,6 +987,73 @@ def run_condition(dataset: str, cond: TrainCondition, args) -> dict:
                 npz_payload[f"{tag}_{m}_conf_calib"] = apply_calibrator(
                     calibrators[m], results[m]["conf"])
 
+    # ---- OOD detection: inputs from a foreign distribution ------------------
+    # Each method's own score, unchanged, must separate clean ID test inputs
+    # from OOD inputs pushed through the identical preprocessing pipeline.
+    # This is where an input-trust-aware filter should shine: conformity to
+    # the training distribution collapses on OOD data, while softmax is
+    # notoriously overconfident on it.
+    ood_name = args.ood_dataset
+    if ood_name == "auto":
+        ood_name = {"mnist": "fashion", "gtsrb": "cifar10gray"}.get(dataset, "none")
+    _OOD_SPECS = {"fashion": ("FashionMNIST", 28 * 28),
+                  "cifar10gray": ("CIFAR-10 (grayscale)", 32 * 32)}
+    ood_metrics: Optional[dict] = None
+    if ood_name != "none" and results_clean is not None:
+        ood_label, ood_dim = _OOD_SPECS[ood_name]
+        if ood_dim != cfgd["input_dim"]:
+            print(f"  [OOD] {ood_label} ({ood_dim}) does not match "
+                  f"{dataset}'s input dim ({cfgd['input_dim']}) — skipped.")
+        else:
+            from uq_methods import fpr_at_tpr
+            if ood_name == "fashion":
+                from NN.datasets import load_fashion_mnist_test
+                X_ood_full = load_fashion_mnist_test()[0]
+            else:
+                from NN.datasets import load_cifar10_gray_test
+                X_ood_full = load_cifar10_gray_test()
+            n_ood = min(n_sub, len(X_ood_full))
+            ood_idx = np.sort(rng.choice(len(X_ood_full), size=n_ood,
+                                         replace=False))
+            X_ood = X_ood_full[ood_idx]
+            print(f"\n  ── OOD detection: ID = clean {dataset.upper()} vs "
+                  f"OOD = {ood_label} (n={n_ood}) " + "─" * 12)
+            # Labels are irrelevant on OOD data — only the scores are used.
+            ood_results = score_all_methods(
+                X_ood, np.zeros(n_ood, dtype=int), dataset, arch, cfgd, args,
+                is_conv, base, ptas, mc_model, edl_model, cond, itm=itm)
+            id_flag = np.concatenate(
+                [np.ones(len(Xs), dtype=bool), np.zeros(n_ood, dtype=bool)])
+            ood_metrics = {}
+            roc_payload = {}
+            print(f"\n  {'Method':<14} {'AUROC':>8} {'FPR@95':>8} "
+                  f"{'ID score':>9} {'OOD score':>10}")
+            print("  " + "-" * 55)
+            for method, res in results_clean.items():
+                if method not in ood_results:
+                    continue
+                s = np.concatenate([res["score"],
+                                    ood_results[method]["score"]])
+                _, _, auroc = roc_correctness(s, id_flag)
+                m = {"auroc": auroc,
+                     "fpr_at_95tpr": fpr_at_tpr(s, id_flag),
+                     "mean_score_id": float(np.nanmean(res["score"])),
+                     "mean_score_ood": float(
+                         np.nanmean(ood_results[method]["score"]))}
+                ood_metrics[method] = m
+                roc_payload[method] = {"score": s, "correct": id_flag}
+                npz_payload[f"ood_{method}_score"] = np.asarray(
+                    ood_results[method]["score"])
+                print(f"  {method:<14} {m['auroc']:8.3f} "
+                      f"{m['fpr_at_95tpr']:8.3f} {m['mean_score_id']:9.3f} "
+                      f"{m['mean_score_ood']:10.3f}")
+            npz_payload["ood_idx"] = ood_idx
+            plot_roc_methods(roc_payload, os.path.join(out_dir, "roc_ood"),
+                             f"{full_title} — ID vs OOD ({ood_label}) detection")
+            write_ood_tex_table(ood_metrics, dataset, ood_label,
+                                os.path.join(out_dir, "ood_table.tex"),
+                                train_label=cond.label, train_tag=cond.tag)
+
     # ---- Cross-condition outputs -------------------------------------------
     if len(metrics_by_noise) > 1:
         plot_metrics_vs_noise(metrics_by_noise,
@@ -948,13 +1072,16 @@ def run_condition(dataset: str, cond: TrainCondition, args) -> dict:
                    "patas_score": args.patas_score,
                    "itm": (None if itm is None else
                            {"floor_frac": itm.floor_frac, "slack": itm.slack,
-                            "evidence": itm.evidence, "span": itm.span}),
+                            "evidence": itm.evidence, "alpha": itm.alpha,
+                            "weight_cap": itm.weight_cap, "span": itm.span}),
                    "train_condition": {"tag": cond.tag, "x_trust": cond.x_trust,
                                        "y_trust": cond.y_trust,
                                        "noise_level": cond.noise_level,
                                        "label": cond.label},
                    "test_noise": noise_levels,
                    "test_noise_scale": args.test_noise_scale,
+                   "ood_dataset": ood_name,
+                   "ood": ood_metrics,
                    "metrics": metrics_by_tag},
                   fh, indent=2)
     print(f"  Saved {out_dir}/summary.json")
@@ -1009,6 +1136,16 @@ def parse_args():
     p.add_argument("--no-mixed", action="store_true",
                    help="Skip the mixed test batch (clean + strongest noise "
                         "level pooled 1:1)")
+    p.add_argument("--ood-dataset",
+                   choices=["auto", "fashion", "cifar10gray", "none"],
+                   default="auto",
+                   help="OOD set for the ID-vs-OOD detection block, pushed "
+                        "through the identical ID preprocessing: 'auto' "
+                        "(default) picks FashionMNIST for mnist and "
+                        "grayscale CIFAR-10 for gtsrb (none for cifar10); "
+                        "'none' disables. First use may download via "
+                        "torchvision — on offline compute nodes, warm the "
+                        "data/ cache once from a login node.")
     p.add_argument("--patas-input-trust",
                    choices=["conformity", "constant"], default="conformity",
                    help="Input opinion for the PaTAS trust factor: "
@@ -1038,6 +1175,15 @@ def parse_args():
                    help="Per-feature σ floor as a fraction of the feature "
                         "span (default 0.02; larger values blunt corruption "
                         "detection on near-constant features)")
+    p.add_argument("--itm-alpha", dest="itm_alpha", type=float, default=2.0,
+                   help="Precision-weighting exponent for per-feature "
+                        "evidence, w_j=(σ_ref/σ_j)^α (default 2 = "
+                        "inverse-variance; 0 = unweighted ablation, which "
+                        "caps the corruption signal at the fraction of "
+                        "reliable features)")
+    p.add_argument("--itm-weight-cap", dest="itm_weight_cap", type=float, default=64.0,
+                   help="Cap on the per-feature reliability weight "
+                        "(default 64)")
     p.add_argument("--label-noise", type=float, nargs="*", default=[0.3],
                    help="Train-time label-flip rates: for each value, a "
                         "second set of models is trained on label-noised "
