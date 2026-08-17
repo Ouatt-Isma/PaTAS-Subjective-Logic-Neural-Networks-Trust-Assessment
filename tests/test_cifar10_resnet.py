@@ -75,21 +75,24 @@ _LR             = 0.05
 # run_uq_comparison.py (and future scripts) can reuse the artefacts.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _cifar_paths(x_trust: str, y_trust: str, epsilon_low: float) -> tuple[str, str]:
-    """(PTAS_Eval dir, NN_Train dir) for a CIFAR-10 ResNet-lite scenario."""
-    ptas_dir = (
-        f"results/PTAS_Eval_cifar10_resnet-lite_{x_trust}_{y_trust}"
-        f"_eps_{epsilon_low}_PathSize_None"
-    )
-    nn_dir = f"results/NN_Train_cifar10_resnet-lite_{x_trust}_{y_trust}_PathSize_None"
-    return ptas_dir, nn_dir
+def _cifar_paths(x_trust: str, y_trust: str, epsilon_low: float,
+                 noise_level: float | None = None) -> tuple[str, str]:
+    """(PTAS_Eval dir, NN_Train dir) for a CIFAR-10 ResNet-lite scenario —
+    delegates to the canonical helpers in patas_module/main.py so the naming
+    (including the _nl<rate> corruption suffix) can never drift from
+    start_ptas / start_client / run_uq_comparison."""
+    from main import nn_cache_dir, ptas_cache_dir
+    return (ptas_cache_dir("cifar10", "resnet-lite", x_trust, y_trust,
+                           epsilon_low, noise_level=noise_level),
+            nn_cache_dir("cifar10", "resnet-lite", x_trust, y_trust,
+                         noise_level=noise_level))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Subprocess workers
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _ptas_worker(result_queue, ready_event, port, x_trust, y_trust,
-                 epsilon_low, base_channels) -> None:
+                 epsilon_low, base_channels, noise_level=None) -> None:
     """PTASConv server subprocess mirroring the CIFAR-10 ResNet.
 
     Mirrors start_ptas: loads omega_arrays.pkl when cached (skipping training)
@@ -127,7 +130,7 @@ def _ptas_worker(result_queue, ready_event, port, x_trust, y_trust,
         )
         print(f"[PTASConv] Device: {ptas.device}")
 
-        datapath, _ = _cifar_paths(x_trust, y_trust, epsilon_low)
+        datapath, _ = _cifar_paths(x_trust, y_trust, epsilon_low, noise_level)
         omega_path = os.path.join(datapath, "omega_arrays.pkl")
         expected_shapes = [(r, c, 3) for r, c in spec_omega_shapes(specs)]
 
@@ -194,7 +197,8 @@ def _client_worker(result_queue, port, epochs, x_trust, y_trust,
         from NN.utils import writedict
         from main import TRUST_TO_DATASET
 
-        ptas_dir, datapath = _cifar_paths(x_trust, y_trust, epsilon_low)
+        ptas_dir, datapath = _cifar_paths(x_trust, y_trust, epsilon_low,
+                                          noise_level)
         os.makedirs(datapath, exist_ok=True)
         nn_model_path = os.path.join(datapath, "nn_model.pkl")
         metrics_path = os.path.join(datapath, "metrics.txt")
@@ -266,7 +270,8 @@ def run_cifar_resnet_scenario(epochs: int = _DEFAULT_EPOCHS,
 
     ptas_proc = multiprocessing.Process(
         target=_ptas_worker,
-        args=(ptas_q, ready_event, port, x_trust, y_trust, epsilon_low, base_channels))
+        args=(ptas_q, ready_event, port, x_trust, y_trust, epsilon_low,
+              base_channels, noise_level))
     ptas_proc.start()
     ready_event.wait(timeout=60)
 

@@ -70,25 +70,29 @@ _HIDDEN_DIM:     int       = 128
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _datapath(cfg: TestCaseConfig) -> str:
-    """Return the result directory that start_client() writes to."""
+def _arch_str(cfg: TestCaseConfig) -> str:
     hidden_list = list(cfg.hidden_dims) if cfg.hidden_dims else [cfg.hidden_dim]
-    arch_str = "_".join(str(h) for h in hidden_list)
-    return (
-        f"results/NN_Train_{cfg.dataset}_{arch_str}_{cfg.x_trust}_{cfg.y_trust}"
-        f"_PathSize_{cfg.mnist_patch_size if cfg.mnist_poisoned_soph else 'None'}"
-    )
+    return "_".join(str(h) for h in hidden_list)
+
+
+def _datapath(cfg: TestCaseConfig) -> str:
+    """Result directory that start_client() writes to — delegates to the
+    canonical helper in patas_module/main.py so the naming can never drift."""
+    from main import nn_cache_dir
+    return nn_cache_dir(
+        cfg.dataset, _arch_str(cfg), cfg.x_trust, cfg.y_trust,
+        patch=cfg.mnist_patch_size if cfg.mnist_poisoned_soph else None,
+        noise_level=cfg.noise_level)
 
 
 def _ptas_datapath(cfg: TestCaseConfig) -> str:
-    """Return the result directory that start_ptas() writes to."""
-    hidden_list = list(cfg.hidden_dims) if cfg.hidden_dims else [cfg.hidden_dim]
-    arch_str = "_".join(str(h) for h in hidden_list)
-    return (
-        f"results/PTAS_Eval_{cfg.dataset}_{arch_str}_{cfg.x_trust}_{cfg.y_trust}"
-        f"_eps_{cfg.epsilon_low}"
-        f"_PathSize_{cfg.mnist_patch_size if cfg.mnist_poisoned_soph else 'None'}"
-    )
+    """Result directory that start_ptas() writes to — canonical helper."""
+    from main import ptas_cache_dir
+    return ptas_cache_dir(
+        cfg.dataset, _arch_str(cfg), cfg.x_trust, cfg.y_trust, cfg.epsilon_low,
+        patch=cfg.mnist_patch_size if cfg.mnist_poisoned_soph else None,
+        fuse_method=getattr(cfg, "fuse_method", "average"),
+        noise_level=cfg.noise_level)
 
 
 def _load_result_from_disk(
