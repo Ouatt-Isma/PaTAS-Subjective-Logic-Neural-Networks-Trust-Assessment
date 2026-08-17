@@ -295,7 +295,7 @@ def write_table(rows: list[dict], correlations: dict, dataset: str,
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("--dataset", choices=["mnist", "gtsrb"], default="mnist")
+    p.add_argument("--dataset", choices=["mnist", "fashion", "gtsrb"], default="mnist")
     p.add_argument("--arch", type=int, nargs="+", default=None,
                    help="Override MLP hidden dims, e.g. --arch 512")
     p.add_argument("--rates", type=float, nargs="+",
@@ -366,7 +366,7 @@ def main():
     for key, c in correlations.items():
         print(f"    {key:<16} r={c['pearson']:+.3f}  ρ={c['spearman']:+.3f}")
 
-    title = {"mnist": "MNIST", "gtsrb": "GTSRB"}[dataset]
+    title = {"mnist": "MNIST", "fashion": "Fashion-MNIST", "gtsrb": "GTSRB"}[dataset]
     plot_rows(rows, os.path.join(out_dir, "model_trust_vs_labelnoise"),
               f"{title} — PaTAS model trust vs. training-label corruption")
     write_table(rows, correlations, dataset, os.path.join(out_dir, "table.tex"))
