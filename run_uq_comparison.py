@@ -603,17 +603,21 @@ def write_tex_table(conditions: list, dataset: str, out_path: str,
         r"recalibration (ECE / ECE$_{\text{cal}}$, lower is better; the "
         r"calibrator for each method is fit once on a held-out clean split "
         r"and reused unchanged across all test conditions, so no "
-        r"method is treated differently). DeepTrust has "
+        r"method is treated differently). Det.\ is the corruption-detection "
+        r"AUROC, defined on the mixed batch only: how well the method's own "
+        r"score separates clean from corrupted inputs — on a "
+        r"corruption-robust model a different question from "
+        r"correct-vs-incorrect ranking. DeepTrust has "
         r"no public implementation; values are those reported by Cheng et~al.}",
         rf"\label{{tab:uq-comparison-{dataset}{'-' + train_tag if train_tag else ''}}}",
-        r"\begin{tabular}{lccccc}",
+        r"\begin{tabular}{lcccccc}",
         r"\toprule",
         r"Method & Accuracy (\%) & AUROC $\uparrow$ & AURC $\downarrow$ & "
-        r"ECE $\downarrow$ & ECE$_{\text{cal}}$ $\downarrow$ \\",
+        r"ECE $\downarrow$ & ECE$_{\text{cal}}$ $\downarrow$ & Det.\ $\uparrow$ \\",
     ]
     for tag, cond_label, metrics in conditions:
         lines += [r"\midrule",
-                  rf"\multicolumn{{6}}{{l}}{{\textit{{{cond_label}}}}} \\"]
+                  rf"\multicolumn{{7}}{{l}}{{\textit{{{cond_label}}}}} \\"]
         for method in ("patas", "softmax", "mc_dropout", "edl"):
             if method not in metrics:
                 continue
@@ -621,7 +625,7 @@ def write_tex_table(conditions: list, dataset: str, out_path: str,
             lines.append(
                 f"{label_map[method]} & {_f(m.get('test_acc', np.nan)*100, '{:.2f}')} & "
                 f"{_f(m.get('auroc'))} & {_f(m.get('aurc'))} & {_f(m.get('ece'))} & "
-                f"{_f(m.get('ece_calib'))} \\\\")
+                f"{_f(m.get('ece_calib'))} & {_f(m.get('corruption_det_auroc'))} \\\\")
         if tag == "clean":
             dt = DEEPTRUST_PAPER.get(dataset)
             if dt:
@@ -629,12 +633,12 @@ def write_tex_table(conditions: list, dataset: str, out_path: str,
                 lines.append(
                     f"DeepTrust~\\cite{{cheng2020deeptrust}}$^{{\\dagger}}$ & "
                     f"{_f(acc*100 if acc is not None else None, '{:.2f}')} & "
-                    f"{_f(dt.get('auroc'))} & — & {_f(dt.get('ece'))} & — \\\\")
+                    f"{_f(dt.get('auroc'))} & — & {_f(dt.get('ece'))} & — & — \\\\")
             else:
-                lines.append(r"DeepTrust~\cite{cheng2020deeptrust}$^{\dagger}$ & — & — & — & — & — \\")
+                lines.append(r"DeepTrust~\cite{cheng2020deeptrust}$^{\dagger}$ & — & — & — & — & — & — \\")
     lines += [
         r"\bottomrule",
-        r"\multicolumn{6}{l}{\footnotesize $^{\dagger}$No public code; "
+        r"\multicolumn{7}{l}{\footnotesize $^{\dagger}$No public code; "
         r"values as reported in the original paper (fill \texttt{DEEPTRUST\_PAPER}).}\\",
         r"\end{tabular}",
         r"\end{table}",
@@ -977,6 +981,18 @@ def run_condition(dataset: str, cond: TrainCondition, args,
         if tag == "clean":
             results_clean = results
         metrics = compute_metrics(results, calibrators)
+        if tag == "mixed":
+            # Corruption detection: on the pooled batch, how well does each
+            # method's own score separate clean from corrupted inputs?  On a
+            # corruption-robust model this is a *different* question from
+            # correct-vs-incorrect ranking — a trust-aware filter should
+            # flag the distribution violation even when the prediction
+            # happens to survive it.
+            member = np.concatenate([np.ones(len(Xs), dtype=bool),
+                                     np.zeros(len(Xn) - len(Xs), dtype=bool)])
+            for method, res in results.items():
+                _, _, det = roc_correctness(res["score"], member)
+                metrics[method]["corruption_det_auroc"] = det
         metrics_by_tag[tag] = metrics
         tex_conditions.append((tag, cond_lbl, metrics))
         if nl is not None:
@@ -987,6 +1003,10 @@ def run_condition(dataset: str, cond: TrainCondition, args,
         for method, m in metrics.items():
             print(f"  {method:<14} {m['test_acc']*100:7.2f}% {m['auroc']:8.3f} "
                   f"{m['aurc']:8.3f} {m['ece']:8.3f} {m.get('ece_calib', float('nan')):8.3f}")
+        if tag == "mixed":
+            print("  corruption-detection AUROC (clean vs corrupted): "
+                  + "  ".join(f"{meth} {m['corruption_det_auroc']:.3f}"
+                              for meth, m in metrics.items()))
 
         plot_roc_methods(results, os.path.join(out_dir, f"roc_{tag}"),
                          f"{full_title} ({cond_lbl.replace('$', '')}) — correct-vs-incorrect ROC")
@@ -1159,7 +1179,8 @@ def aggregate_seed_outputs(dataset: str, cond: TrainCondition, seeds: list,
     }
     metric_cols = [("test_acc", 100.0, "{:.2f}"), ("auroc", 1.0, "{:.3f}"),
                    ("aurc", 1.0, "{:.3f}"), ("ece", 1.0, "{:.3f}"),
-                   ("ece_calib", 1.0, "{:.3f}")]
+                   ("ece_calib", 1.0, "{:.3f}"),
+                   ("corruption_det_auroc", 1.0, "{:.3f}")]
 
     tags = list(per_seed[0]["metrics"].keys())
     agg: dict = {}
@@ -1171,18 +1192,19 @@ def aggregate_seed_outputs(dataset: str, cond: TrainCondition, seeds: list,
         r"mean $\pm$ std over " + str(len(seeds)) + r" evaluation seeds "
         r"(seeds vary the test/calibration subsets, corruption draws and "
         r"MC-Dropout sampling over the same trained models). Metrics as in "
-        r"the single-seed table.}",
+        r"the single-seed table; Det.\ (corruption-detection AUROC) is "
+        r"defined on the mixed batch only.}",
         rf"\label{{tab:uq-comparison-{dataset}"
         rf"{'-' + cond.tag if cond.tag else ''}-seeds}}",
-        r"\begin{tabular}{lccccc}",
+        r"\begin{tabular}{lcccccc}",
         r"\toprule",
         r"Method & Accuracy (\%) & AUROC $\uparrow$ & AURC $\downarrow$ & "
-        r"ECE $\downarrow$ & ECE$_{\text{cal}}$ $\downarrow$ \\",
+        r"ECE $\downarrow$ & ECE$_{\text{cal}}$ $\downarrow$ & Det.\ $\uparrow$ \\",
     ]
     print(f"\n  ══ aggregate over seeds {seeds} — {cond.label} ══")
     for tag in tags:
         lines += [r"\midrule",
-                  rf"\multicolumn{{6}}{{l}}{{\textit{{{_tag_label(tag)}}}}} \\"]
+                  rf"\multicolumn{{7}}{{l}}{{\textit{{{_tag_label(tag)}}}}} \\"]
         print(f"  ── {_tag_label(tag)}")
         methods = per_seed[0]["metrics"][tag].keys()
         for method in methods:
