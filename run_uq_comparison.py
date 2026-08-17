@@ -156,6 +156,7 @@ _DEFAULT_EPS = 0.05
 
 DATASET_CFG = {
     "mnist":   {"arch": (128,),  "input_dim": 28 * 28, "output_dim": 10, "port": 5241},
+    "fashion": {"arch": (128,),  "input_dim": 28 * 28, "output_dim": 10, "port": 5271},
     "gtsrb":   {"arch": (128,),  "input_dim": 32 * 32, "output_dim": 43, "port": 5251},
     "cifar10": {"arch": "resnet-lite", "input_dim": 3 * 32 * 32, "output_dim": 10,
                 "port": 5261, "img_size": 32, "in_channels": 3, "base_channels": 16},
@@ -164,8 +165,8 @@ DATASET_CFG = {
 
 def _lr_for(dataset: str):
     from main import get_lr_mnist, get_lr_gtsrb
-    return {"mnist": get_lr_mnist, "gtsrb": get_lr_gtsrb,
-            "cifar10": get_lr_mnist}[dataset]
+    return {"mnist": get_lr_mnist, "fashion": get_lr_mnist,
+            "gtsrb": get_lr_gtsrb, "cifar10": get_lr_mnist}[dataset]
 
 
 def _arch_str(arch) -> str:
@@ -964,7 +965,8 @@ def run_condition(dataset: str, cond: TrainCondition, args,
              Xmix, np.concatenate([ys, ys])))
 
     # ---- Evaluate on every test condition -------------------------------------
-    title = {"mnist": "MNIST", "gtsrb": "GTSRB", "cifar10": "CIFAR-10"}[dataset]
+    title = {"mnist": "MNIST", "fashion": "Fashion-MNIST",
+             "gtsrb": "GTSRB", "cifar10": "CIFAR-10"}[dataset]
     full_title = f"{title} — {cond.label}" if cond.tag else title
     metrics_by_tag: dict = {}
     tex_conditions: list = []
@@ -1029,8 +1031,10 @@ def run_condition(dataset: str, cond: TrainCondition, args,
     # notoriously overconfident on it.
     ood_name = args.ood_dataset
     if ood_name == "auto":
-        ood_name = {"mnist": "fashion", "gtsrb": "cifar10gray"}.get(dataset, "none")
+        ood_name = {"mnist": "fashion", "fashion": "mnistood",
+                    "gtsrb": "cifar10gray"}.get(dataset, "none")
     _OOD_SPECS = {"fashion": ("FashionMNIST", 28 * 28),
+                  "mnistood": ("MNIST", 28 * 28),
                   "cifar10gray": ("CIFAR-10 (grayscale)", 32 * 32)}
     ood_metrics: Optional[dict] = None
     if ood_name != "none" and results_clean is not None:
@@ -1045,6 +1049,9 @@ def run_condition(dataset: str, cond: TrainCondition, args,
                 if ood_name == "fashion":
                     from NN.datasets import load_fashion_mnist_test
                     X_ood_full = load_fashion_mnist_test()[0]
+                elif ood_name == "mnistood":
+                    from NN.datasets import load_mnist_test_fashionized
+                    X_ood_full = load_mnist_test_fashionized()
                 else:
                     from NN.datasets import load_cifar10_gray_test
                     X_ood_full = load_cifar10_gray_test()
@@ -1343,15 +1350,16 @@ def parse_args():
                    help="Skip the mixed test batch (clean + strongest noise "
                         "level pooled 1:1)")
     p.add_argument("--ood-dataset",
-                   choices=["auto", "fashion", "cifar10gray", "none"],
+                   choices=["auto", "fashion", "mnistood", "cifar10gray", "none"],
                    default="auto",
                    help="OOD set for the ID-vs-OOD detection block, pushed "
                         "through the identical ID preprocessing: 'auto' "
-                        "(default) picks FashionMNIST for mnist and "
-                        "grayscale CIFAR-10 for gtsrb (none for cifar10); "
-                        "'none' disables. First use may download via "
-                        "torchvision — on offline compute nodes, warm the "
-                        "data/ cache once from a login node.")
+                        "(default) picks FashionMNIST for mnist, MNIST for "
+                        "fashion, and grayscale CIFAR-10 for gtsrb (none "
+                        "for cifar10); 'none' disables. First use may "
+                        "download via torchvision — on offline compute "
+                        "nodes, warm the data/ cache once from a login "
+                        "node.")
     p.add_argument("--patas-input-trust",
                    choices=["conformity", "constant"], default="conformity",
                    help="Input opinion for the PaTAS trust factor: "
