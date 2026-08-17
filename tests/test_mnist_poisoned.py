@@ -637,9 +637,9 @@ def plot_table2a(
     row_defs = [
         ("Clean 3",                                    "clean_3"),
         ("Clean 6",                                    "clean_6"),
-        (f"6 w/ patch",                   "pois_6_trusted"),
+        ("6 w/ patch",                   "pois_6_trusted"),
         # (f"6 w/ patch (patch distrusted)",             "pois_6_distrust"),
-        (f"3 w/ patch",                   "pois_3_trusted"),
+        ("3 w/ patch",                   "pois_3_trusted"),
         # (f"3 w/ patch (patch distrusted)",             "pois_3_distrust"),
     ]
 
@@ -695,9 +695,9 @@ def plot_trust_2a_vs_2c(
     row_defs = [
         ("Clean 3",                          "clean_3"),
         ("Clean 6",                          "clean_6"),
-        (f"6 w/ patch",         "pois_6_trusted"),
+        ("6 w/ patch",         "pois_6_trusted"),
         # (f"6 w/ patch (patch distrusted)",   "pois_6_distrust"),
-        (f"3 w/ patch",         "pois_3_trusted"),
+        ("3 w/ patch",         "pois_3_trusted"),
         # (f"3 w/ patch (patch distrusted)",   "pois_3_distrust"),
     ]
 

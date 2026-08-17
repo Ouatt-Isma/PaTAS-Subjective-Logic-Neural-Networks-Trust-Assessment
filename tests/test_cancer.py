@@ -504,7 +504,7 @@ def print_results_table(results: list[dict[str, Any]]) -> None:
         # Print thin separator + label between grid and extra rows
         if prev_group == "grid" and grp == "extra":
             print(thin)
-            print(f"  ── extra scenarios ──")
+            print("  ── extra scenarios ──")
             print(thin)
         prev_group = grp
 

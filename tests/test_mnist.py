@@ -673,7 +673,7 @@ def main() -> None:
         arch_str = "-".join(str(h) for h in hidden_dims)
 
         print(f"\n{'='*64}")
-        print(f"  MNIST NOISE SWEEP  |  vacuous/vacuous")
+        print("  MNIST NOISE SWEEP  |  vacuous/vacuous")
         print(f"  arch={arch_str}  epochs={args.epochs}  ε={args.epsilon_low}")
         print(f"  noise ∈ {NOISE_LEVELS}  (feature noise_prob = label flip_rate)")
         print(f"{'='*64}\n")
