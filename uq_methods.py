@@ -479,6 +479,18 @@ def roc_correctness(scores: np.ndarray, correct: np.ndarray):
     return fpr, tpr, float(auc(fpr, tpr))
 
 
+def fpr_at_tpr(scores: np.ndarray, labels: np.ndarray,
+               tpr_target: float = 0.95) -> float:
+    """FPR at the smallest threshold reaching ``tpr_target`` — the standard
+    OOD-detection companion metric to AUROC (labels: 1 = in-distribution)."""
+    from sklearn.metrics import roc_curve
+    scores = np.asarray(scores, dtype=float)
+    ok = np.isfinite(scores)
+    fpr, tpr, _ = roc_curve(np.asarray(labels, dtype=int)[ok], scores[ok])
+    idx = int(np.searchsorted(tpr, tpr_target, side="left"))
+    return float(fpr[min(idx, len(fpr) - 1)])
+
+
 def aurc(scores: np.ndarray, correct: np.ndarray) -> float:
     """Area under the Risk–Coverage curve (lower is better).
 
