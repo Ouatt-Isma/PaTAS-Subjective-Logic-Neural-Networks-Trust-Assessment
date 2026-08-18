@@ -69,7 +69,7 @@ import matplotlib.pyplot as plt
 
 from run_uq_comparison import (
     DATASET_CFG, _arch_str, _DEFAULT_EPS,
-    CLEAN_CONDITION, label_noise_condition,
+    CLEAN_CONDITION, TrainCondition, label_noise_condition,
     get_base_mlp, ensure_patas_cache, load_offline_ptas, patas_ipta_scores,
 )
 
@@ -113,19 +113,32 @@ def model_feedforward_trust(ptas, input_dim: int) -> tuple[float, float]:
     return (float(agg[0] + 0.5 * agg[2]), float(norm[0] + 0.5 * norm[2]))
 
 
-def eval_rate(dataset: str, rate: float, args) -> dict:
+def eval_rate(dataset: str, rate: float, args, informed: bool = False) -> dict:
+    """``informed=True`` runs the rate-informed variant of reviewer
+    question 3: instead of the vacuous (no-knowledge) label opinion, the
+    label opinions carry the corruption rate, (1-p, 0, p), showing that the
+    tripwire grades into a severity signal when label trust is informative
+    (the flat tripwire is the honest no-knowledge setting, not a limit of
+    the calculus)."""
     from NN.datasets import load_data
-    from main import TRUST_TO_DATASET
 
-    cond = CLEAN_CONDITION if rate == 0 else label_noise_condition(rate)
+    if rate == 0:
+        cond = CLEAN_CONDITION
+    elif informed:
+        cond = TrainCondition(f"labelnoise{rate:g}inf", "trust",
+                              f"{1-rate:g},0.0,{rate:g}", rate,
+                              f"Label noise (rate-informed opinions, $p={rate:g}$)")
+    else:
+        cond = label_noise_condition(rate)
     cfgd = DATASET_CFG[dataset]
     arch = cfgd["arch"]
 
     print(f"\n{'='*70}\n  Model-trust audit — {dataset} ({_arch_str(arch)})  "
-          f"label-flip rate p={rate:g}  ({cond.label})\n{'='*70}")
+          f"label-flip rate p={rate:g}"
+          f"{'  [rate-informed opinions]' if informed else ''}\n{'='*70}")
 
-    x_how = TRUST_TO_DATASET.get(cond.x_trust, "clean")
-    y_how = TRUST_TO_DATASET.get(cond.y_trust, "clean")
+    x_how = "clean"
+    y_how = "clean" if rate == 0 else "noise"
     _load_kwargs = {} if cond.noise_level is None else {"noise_level": cond.noise_level}
     X_train, X_test, y_train, y_test, _ = load_data(dataset, x_how, y_how,
                                                      **_load_kwargs)
@@ -149,11 +162,21 @@ def eval_rate(dataset: str, rate: float, args) -> dict:
     row["mean_conf"] = float(probs.max(1).mean())
     row["conf_acc_gap"] = row["mean_conf"] - row["test_acc"]
 
+    # Training-data audit baselines from the noisy-label literature: both
+    # grade with severity, and both require retaining the training data at
+    # audit time, which the PaTAS feedforward trust does not.
+    tr_probs = base.forward(X_train)
+    given = y_train.argmax(1)
+    row["disagree_frac"] = float(np.mean(tr_probs.argmax(1) != given))
+    p_true = np.clip(tr_probs[np.arange(len(given)), given], 1e-12, None)
+    row["mean_train_loss"] = float(-np.log(p_true).mean())
+
     ptas = None
     if ensure_patas_cache(dataset, arch, args.eps, args.epochs,
                           args.train_missing, fuse_method=args.fuse_method,
                           x_trust=cond.x_trust, y_trust=cond.y_trust,
                           noise_level=cond.noise_level,
+                          y_dataset=y_how if rate > 0 else None,
                           force_retrain=args.force_retrain_all):
         ptas = load_offline_ptas(dataset, arch, args.eps,
                                  fuse_method=args.fuse_method,
@@ -312,6 +335,11 @@ def parse_args():
                    help="Samples for the per-sample IPTA path-trust mean "
                         "(default 500)")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--rate-informed", action="store_true",
+                   help="Additionally run the audit with rate-informed "
+                        "label opinions (1-p, 0, p) instead of vacuous "
+                        "ones, demonstrating a graded severity signal when "
+                        "label trust is informative (reviewer Q3)")
     p.add_argument("--train-missing", action="store_true")
     p.add_argument("--force-retrain-all", action="store_true",
                    help="Retrain base NN and PaTAS caches even if present")
@@ -342,6 +370,14 @@ def main():
 
     rows = [eval_rate(dataset, float(r), args) for r in sorted(set(args.rates))]
     add_margins(rows)
+    if args.rate_informed:
+        informed = {r["rate"]: r for r in
+                    (eval_rate(dataset, float(p), args, informed=True)
+                     for p in sorted(set(args.rates)) if p > 0)}
+        for r in rows:
+            src_row = informed.get(r["rate"])
+            r["ff_trust_informed"] = (src_row["ff_trust"] if src_row
+                                      else r["ff_trust"])
 
     acc = [r["test_acc"] for r in rows]
     correlations = {
@@ -351,13 +387,17 @@ def main():
     }
 
     print(f"\n  {'p':>5} {'acc':>8} {'conf':>8} {'ff_trust':>9} "
-          f"{'ff_norm':>8} {'path':>8} {'Δtrust%':>8} {'Δconf%':>8}")
-    print("  " + "-" * 70)
+          f"{'ff_norm':>8} {'path':>8} {'Δtrust%':>8} {'Δconf%':>8} "
+          f"{'p̂(disagr)':>9} {'trLoss':>7} {'ff_inf':>7}")
+    print("  " + "-" * 92)
     for r in rows:
         print(f"  {r['rate']:>5g} {r['test_acc']*100:7.2f}% "
               f"{r['mean_conf']:8.4f} {r['ff_trust']:9.4f} "
               f"{r['ff_trust_norm']:8.4f} {r['mean_path_trust']:8.4f} "
-              f"{r['trust_drop_rel']*100:7.1f}% {r['conf_drop_rel']*100:7.1f}%")
+              f"{r['trust_drop_rel']*100:7.1f}% {r['conf_drop_rel']*100:7.1f}% "
+              f"{r.get('disagree_frac', float('nan')):9.3f} "
+              f"{r.get('mean_train_loss', float('nan')):7.3f} "
+              f"{r.get('ff_trust_informed', float('nan')):7.4f}")
     print("\n  Detection margin: PaTAS trust reads from training dynamics "
           "alone (no test data);\n  mean confidence needs a clean labelled "
           "test set. Δ% = relative drop vs. the p=0 model.")
