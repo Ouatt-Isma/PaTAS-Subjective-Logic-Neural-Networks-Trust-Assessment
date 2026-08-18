@@ -332,6 +332,25 @@ def load_offline_ptas(dataset: str, arch: tuple, eps: float,
     )
 
 
+def mlp_features_logits(base, X: np.ndarray, chunk: int = 4096):
+    """Penultimate ReLU features and pre-softmax logits of the base MLP
+    (shared by the feature-space baselines: Mahalanobis, kNN, energy)."""
+    import torch
+    feats, logits = [], []
+    with torch.no_grad():
+        for i in range(0, len(X), chunk):
+            a = base._to_tensor(X[i:i + chunk])
+            L = len(base.weights)
+            for l, (W, b) in enumerate(zip(base.weights, base.biases)):
+                z = a @ W + b
+                if l == L - 1:
+                    feats.append(a.cpu().numpy())
+                    logits.append(z.cpu().numpy())
+                else:
+                    a = torch.relu(z)
+    return np.concatenate(feats), np.concatenate(logits)
+
+
 def _discounted_confidence(trust: np.ndarray, conf: np.ndarray,
                            n_classes: int) -> np.ndarray:
     """SL trust discounting of the prediction confidence, anchored at the
@@ -477,6 +496,8 @@ def ensure_patas_cache(dataset: str, arch: tuple, eps: float, epochs: int,
                        train_missing: bool, fuse_method: str = "average",
                        x_trust: str = "trust", y_trust: str = "trust",
                        noise_level: Optional[float] = None,
+                       x_dataset: Optional[str] = None,
+                       y_dataset: Optional[str] = None,
                        force_retrain: bool = False) -> bool:
     """Make sure omega_arrays.pkl exists; optionally run the scenario."""
     ptas_dir = _ptas_dir(dataset, arch, eps, fuse_method, x_trust, y_trust,
@@ -507,6 +528,7 @@ def ensure_patas_cache(dataset: str, arch: tuple, eps: float, epochs: int,
         x_trust=x_trust, y_trust=y_trust, port=cfgd["port"],
         mnist_patch_size=None, mnist_poisoned_soph=False,
         fuse_method=fuse_method, noise_level=noise_level,
+        x_dataset=x_dataset, y_dataset=y_dataset,
     )
     run_scenario(cfg)
     ok = os.path.exists(omega_path)
@@ -583,10 +605,14 @@ def write_tex_table(conditions: list, dataset: str, out_path: str,
         return fmt.format(v) if v is not None and np.isfinite(v) else "—"
 
     label_map = {
-        "patas":      "PaTAS filter (ours)",
-        "softmax":    "Softmax filter",
-        "mc_dropout": "MC Dropout~\\cite{gal2016dropout}",
-        "edl":        "EDL~\\cite{sensoy2018evidential}",
+        "patas":       "PaTAS filter (ours)",
+        "conformity":  "Conformity only (no propagation)",
+        "softmax":     "Softmax filter",
+        "mc_dropout":  "MC Dropout~\\cite{gal2016dropout}",
+        "edl":         "EDL~\\cite{sensoy2018evidential}",
+        "mahalanobis": "Mahalanobis~\\cite{lee2018mahalanobis}",
+        "knn":         "kNN~\\cite{sun2022knnood}",
+        "energy":      "Energy~\\cite{liu2020energy}",
     }
     lines = [
         r"\begin{table}[ht]",
@@ -619,7 +645,7 @@ def write_tex_table(conditions: list, dataset: str, out_path: str,
     for tag, cond_label, metrics in conditions:
         lines += [r"\midrule",
                   rf"\multicolumn{{7}}{{l}}{{\textit{{{cond_label}}}}} \\"]
-        for method in ("patas", "softmax", "mc_dropout", "edl"):
+        for method in ("patas", "conformity", "softmax", "mc_dropout", "edl", "mahalanobis", "knn", "energy"):
             if method not in metrics:
                 continue
             m = metrics[method]
@@ -658,10 +684,14 @@ def write_ood_tex_table(ood_metrics: dict, dataset: str, ood_label: str,
         return fmt.format(v) if v is not None and np.isfinite(v) else "—"
 
     label_map = {
-        "patas":      "PaTAS filter (ours)",
-        "softmax":    "Softmax filter",
-        "mc_dropout": "MC Dropout~\\cite{gal2016dropout}",
-        "edl":        "EDL~\\cite{sensoy2018evidential}",
+        "patas":       "PaTAS filter (ours)",
+        "conformity":  "Conformity only (no propagation)",
+        "softmax":     "Softmax filter",
+        "mc_dropout":  "MC Dropout~\\cite{gal2016dropout}",
+        "edl":         "EDL~\\cite{sensoy2018evidential}",
+        "mahalanobis": "Mahalanobis~\\cite{lee2018mahalanobis}",
+        "knn":         "kNN~\\cite{sun2022knnood}",
+        "energy":      "Energy~\\cite{liu2020energy}",
     }
     lines = [
         r"\begin{table}[ht]",
@@ -683,7 +713,7 @@ def write_ood_tex_table(ood_metrics: dict, dataset: str, ood_label: str,
         r"Mean score (ID) & Mean score (OOD) \\",
         r"\midrule",
     ]
-    for method in ("patas", "softmax", "mc_dropout", "edl"):
+    for method in ("patas", "conformity", "softmax", "mc_dropout", "edl", "mahalanobis", "knn", "energy"):
         if method not in ood_metrics:
             continue
         m = ood_metrics[method]
@@ -703,7 +733,8 @@ def write_ood_tex_table(ood_metrics: dict, dataset: str, ood_label: str,
 
 def score_all_methods(Xn, ys, dataset, arch, cfgd, args, is_conv,
                       base, ptas, mc_model, edl_model, cond,
-                      itm: Optional[InputTrustModel] = None) -> dict:
+                      itm: Optional[InputTrustModel] = None,
+                      aux: Optional[dict] = None) -> dict:
     """Score every available method on one (possibly noised) test batch.
 
     Returns {method: {'score','conf','correct','test_acc'}}.  Labels stay
@@ -712,7 +743,11 @@ def score_all_methods(Xn, ys, dataset, arch, cfgd, args, is_conv,
     see at deployment time.  ``cond`` (TrainCondition) selects which PaTAS
     cache (trained under that x_trust/y_trust condition) provides the trust
     factor; ``itm`` supplies the per-sample input-trust opinions (None =
-    historical constant fully-trusted input).
+    historical constant fully-trusted input); ``aux`` carries the fitted
+    feature-space baselines ({'maha','knn_bank'}) so the review's
+    attribution question can be answered: conformity alone (no
+    propagation), and standard input/feature-space detectors (Mahalanobis,
+    kNN, energy) that also see more than the output layer.
     """
     results: dict = {}
 
@@ -748,6 +783,40 @@ def score_all_methods(Xn, ys, dataset, arch, cfgd, args, is_conv,
             "model_trust": sc["model_trust"],  # model-side component
             "input_trust": sc["input_trust"],  # input-side component
             "correct": correct_base,
+            "test_acc": float(correct_base.mean()),
+        }
+
+    # ---- Conformity only: the input opinions WITHOUT any propagation --------
+    # (answers the attribution question directly: what does the per-feature
+    # conformity model achieve alone, before PaTAS composes it with model
+    # and path trust?)
+    if itm is not None:
+        s_conf = itm.sample_trust(Xn)
+        results["conformity"] = {
+            "score": s_conf, "conf": s_conf, "correct": correct_base,
+            "test_acc": float(correct_base.mean()),
+        }
+
+    # ---- Feature-space baselines (score-only, no probabilistic reading) -----
+    if aux is not None and not is_conv:
+        feats, logits = mlp_features_logits(base, Xn)
+        nan_conf = np.full(len(Xn), np.nan)   # unbounded scores: ECE undefined
+        from uq_methods import mahalanobis_score, knn_score, energy_score
+        if aux.get("maha") is not None:
+            results["mahalanobis"] = {
+                "score": mahalanobis_score(aux["maha"], feats),
+                "conf": nan_conf, "correct": correct_base,
+                "test_acc": float(correct_base.mean()),
+            }
+        if aux.get("knn_bank") is not None:
+            results["knn"] = {
+                "score": knn_score(aux["knn_bank"], feats),
+                "conf": nan_conf, "correct": correct_base,
+                "test_acc": float(correct_base.mean()),
+            }
+        results["energy"] = {
+            "score": energy_score(logits),
+            "conf": nan_conf, "correct": correct_base,
             "test_acc": float(correct_base.mean()),
         }
 
@@ -897,6 +966,17 @@ def run_condition(dataset: str, cond: TrainCondition, args,
                                  x_trust=cond.x_trust, y_trust=cond.y_trust,
                                  noise_level=cond.noise_level)
 
+    # ---- Feature-space baselines, fit once per condition on the same
+    # training data every other method sees --------------------------------
+    aux = None
+    if not is_conv:
+        from uq_methods import fit_mahalanobis, fit_knn_bank
+        feats_tr, _ = mlp_features_logits(base, X_train)
+        aux = {"maha": fit_mahalanobis(feats_tr, y_train.argmax(1),
+                                       seed=args.seed),
+               "knn_bank": fit_knn_bank(feats_tr, seed=args.seed)}
+        del feats_tr
+
     def _factory_dropout():
         if is_conv:
             return TorchResNetLite(specs, cfgd["img_size"], cfgd["in_channels"],
@@ -940,7 +1020,7 @@ def run_condition(dataset: str, cond: TrainCondition, args,
     if n_calib > 0:
         calib_results = score_all_methods(Xc, yc, dataset, arch, cfgd, args, is_conv,
                                           base, ptas, mc_model, edl_model, cond,
-                                          itm=itm)
+                                          itm=itm, aux=aux)
         calibrators = {method: fit_calibrator(res["conf"], res["correct"])
                        for method, res in calib_results.items()}
 
@@ -979,7 +1059,7 @@ def run_condition(dataset: str, cond: TrainCondition, args,
 
         results = score_all_methods(Xn, yn, dataset, arch, cfgd, args, is_conv,
                                     base, ptas, mc_model, edl_model, cond,
-                                    itm=itm)
+                                    itm=itm, aux=aux)
         if tag == "clean":
             results_clean = results
         metrics = compute_metrics(results, calibrators)
@@ -995,6 +1075,18 @@ def run_condition(dataset: str, cond: TrainCondition, args,
             for method, res in results.items():
                 _, _, det = roc_correctness(res["score"], member)
                 metrics[method]["corruption_det_auroc"] = det
+            if "patas" in results and itm is not None:
+                pr = results["patas"]
+                decomp = {}
+                for nm, arr in (("P_input", pr["input_trust"]),
+                                ("P_model", pr["model_trust"]),
+                                ("P_serial", pr["trust"]),
+                                ("score", pr["score"])):
+                    _, _, d_ = roc_correctness(arr, member)
+                    decomp[nm] = round(float(d_), 4)
+                metrics["patas"]["corruption_det_decomposition"] = decomp
+                print("  decomposition (corruption det. AUROC): "
+                      + "  ".join(f"{k} {v:.3f}" for k, v in decomp.items()))
         metrics_by_tag[tag] = metrics
         tex_conditions.append((tag, cond_lbl, metrics))
         if nl is not None:
@@ -1072,7 +1164,8 @@ def run_condition(dataset: str, cond: TrainCondition, args,
             # Labels are irrelevant on OOD data — only the scores are used.
             ood_results = score_all_methods(
                 X_ood, np.zeros(n_ood, dtype=int), dataset, arch, cfgd, args,
-                is_conv, base, ptas, mc_model, edl_model, cond, itm=itm)
+                is_conv, base, ptas, mc_model, edl_model, cond, itm=itm,
+                aux=aux)
             id_flag = np.concatenate(
                 [np.ones(len(Xs), dtype=bool), np.zeros(n_ood, dtype=bool)])
             ood_metrics = {}
@@ -1098,6 +1191,19 @@ def run_condition(dataset: str, cond: TrainCondition, args,
                 print(f"  {method:<14} {m['auroc']:8.3f} "
                       f"{m['fpr_at_95tpr']:8.3f} {m['mean_score_id']:9.3f} "
                       f"{m['mean_score_ood']:10.3f}")
+            if "patas" in results_clean and "patas" in ood_results \
+                    and itm is not None:
+                decomp = {}
+                for nm, key in (("P_input", "input_trust"),
+                                ("P_model", "model_trust"),
+                                ("P_serial", "trust"), ("score", "score")):
+                    s_ = np.concatenate([results_clean["patas"][key],
+                                         ood_results["patas"][key]])
+                    _, _, d_ = roc_correctness(s_, id_flag)
+                    decomp[nm] = round(float(d_), 4)
+                ood_metrics["patas"]["decomposition"] = decomp
+                print("  decomposition (OOD AUROC): "
+                      + "  ".join(f"{k} {v:.3f}" for k, v in decomp.items()))
             npz_payload["ood_idx"] = ood_idx
             plot_roc_methods(roc_payload, os.path.join(out_dir, "roc_ood"),
                              f"{full_title} — ID vs OOD ({ood_label}) detection")
@@ -1179,10 +1285,14 @@ def aggregate_seed_outputs(dataset: str, cond: TrainCondition, seeds: list,
     os.makedirs(out_dir, exist_ok=True)
 
     label_map = {
-        "patas":      "PaTAS filter (ours)",
-        "softmax":    "Softmax filter",
-        "mc_dropout": "MC Dropout~\\cite{gal2016dropout}",
-        "edl":        "EDL~\\cite{sensoy2018evidential}",
+        "patas":       "PaTAS filter (ours)",
+        "conformity":  "Conformity only (no propagation)",
+        "softmax":     "Softmax filter",
+        "mc_dropout":  "MC Dropout~\\cite{gal2016dropout}",
+        "edl":         "EDL~\\cite{sensoy2018evidential}",
+        "mahalanobis": "Mahalanobis~\\cite{lee2018mahalanobis}",
+        "knn":         "kNN~\\cite{sun2022knnood}",
+        "energy":      "Energy~\\cite{liu2020energy}",
     }
     metric_cols = [("test_acc", 100.0, "{:.2f}"), ("auroc", 1.0, "{:.3f}"),
                    ("aurc", 1.0, "{:.3f}"), ("ece", 1.0, "{:.3f}"),
@@ -1261,7 +1371,7 @@ def aggregate_seed_outputs(dataset: str, cond: TrainCondition, seeds: list,
             r"Method & AUROC $\uparrow$ & FPR@95\%TPR $\downarrow$ & "
             r"Mean score (ID) & Mean score (OOD) \\", r"\midrule",
         ]
-        for method in ("patas", "softmax", "mc_dropout", "edl"):
+        for method in ("patas", "conformity", "softmax", "mc_dropout", "edl", "mahalanobis", "knn", "energy"):
             if method not in ood_agg:
                 continue
             m = ood_agg[method]

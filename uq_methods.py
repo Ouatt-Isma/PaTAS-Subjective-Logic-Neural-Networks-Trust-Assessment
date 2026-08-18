@@ -75,11 +75,15 @@ plt.rcParams.update({
 #: Fixed method → (colour, linestyle, label).  Okabe–Ito palette (CVD-safe);
 #: identity is additionally encoded by linestyle for print/grayscale.
 METHOD_STYLE: Dict[str, dict] = {
-    "patas":      {"color": "#0072B2", "ls": "-",  "label": "PaTAS filter"},
-    "softmax":    {"color": "#555555", "ls": "--", "label": "Softmax filter"},
-    "mc_dropout": {"color": "#D55E00", "ls": "-.", "label": "MC Dropout"},
-    "edl":        {"color": "#009E73", "ls": ":",  "label": "EDL (Sensoy et al.)"},
-    "deeptrust":  {"color": "#CC79A7", "ls": "-",  "label": "DeepTrust (Cheng et al.)"},
+    "patas":       {"color": "#0072B2", "ls": "-",  "label": "PaTAS filter"},
+    "conformity":  {"color": "#56B4E9", "ls": "--", "label": "Conformity only (no propagation)"},
+    "softmax":     {"color": "#555555", "ls": "--", "label": "Softmax filter"},
+    "mc_dropout":  {"color": "#D55E00", "ls": "-.", "label": "MC Dropout"},
+    "edl":         {"color": "#009E73", "ls": ":",  "label": "EDL (Sensoy et al.)"},
+    "mahalanobis": {"color": "#E69F00", "ls": "-.", "label": "Mahalanobis (feature space)"},
+    "knn":         {"color": "#F0E442", "ls": ":",  "label": "kNN (feature space)"},
+    "energy":      {"color": "#000000", "ls": "--", "label": "Energy score"},
+    "deeptrust":   {"color": "#CC79A7", "ls": "-",  "label": "DeepTrust (Cheng et al.)"},
 }
 
 
@@ -360,6 +364,74 @@ def edl_predict(model: nn.Module, X: np.ndarray, chunk: int = 4096) -> dict:
     belief = (alpha - 1.0) / S
     return {"probs": probs, "u": u, "score": 1.0 - u,
             "bmax": belief.max(axis=1)}
+
+
+# ---------------------------------------------------------------------------
+# Input/feature-space detector baselines (Lee et al. 2018; Sun et al. 2022;
+# Liu et al. 2020).  All are score-only: they reuse the base network's
+# penultimate features / logits and require no additional training, so they
+# isolate what an input-aware signal achieves WITHOUT any trust propagation.
+# ---------------------------------------------------------------------------
+
+def fit_mahalanobis(feats: np.ndarray, labels: np.ndarray,
+                    max_n: int = 20000, ridge: float = 1e-3,
+                    seed: int = 0) -> dict:
+    """Class-conditional Gaussians with a shared, ridge-regularized
+    covariance on penultimate features (Mahalanobis detector)."""
+    rng = np.random.default_rng(seed)
+    if len(feats) > max_n:
+        idx = rng.choice(len(feats), size=max_n, replace=False)
+        feats, labels = feats[idx], labels[idx]
+    classes = np.unique(labels)
+    means = np.stack([feats[labels == c].mean(axis=0) for c in classes])
+    centered = feats - means[np.searchsorted(classes, labels)]
+    cov = centered.T @ centered / max(len(feats) - 1, 1)
+    cov += ridge * np.trace(cov) / cov.shape[0] * np.eye(cov.shape[0])
+    return {"means": means, "precision": np.linalg.inv(cov)}
+
+
+def mahalanobis_score(fitted: dict, feats: np.ndarray,
+                      chunk: int = 2048) -> np.ndarray:
+    """Higher = more in-distribution: max over classes of the negative
+    squared Mahalanobis distance to the class mean."""
+    P, means = fitted["precision"], fitted["means"]
+    out = np.empty(len(feats), dtype=np.float64)
+    for i in range(0, len(feats), chunk):
+        d = feats[i:i + chunk, None, :] - means[None, :, :]      # (b, K, d)
+        m = np.einsum("bkd,de,bke->bk", d, P, d)                 # (b, K)
+        out[i:i + chunk] = -m.min(axis=1)
+    return out
+
+
+def fit_knn_bank(feats: np.ndarray, max_n: int = 20000,
+                 seed: int = 0) -> np.ndarray:
+    """L2-normalized feature bank for the kNN detector."""
+    rng = np.random.default_rng(seed)
+    if len(feats) > max_n:
+        feats = feats[rng.choice(len(feats), size=max_n, replace=False)]
+    return feats / np.clip(np.linalg.norm(feats, axis=1, keepdims=True),
+                           1e-12, None)
+
+
+def knn_score(bank: np.ndarray, feats: np.ndarray, k: int = 50,
+              chunk: int = 1024) -> np.ndarray:
+    """Higher = more in-distribution: negative distance to the k-th nearest
+    training feature (on L2-normalized features)."""
+    q = feats / np.clip(np.linalg.norm(feats, axis=1, keepdims=True),
+                        1e-12, None)
+    out = np.empty(len(q), dtype=np.float64)
+    for i in range(0, len(q), chunk):
+        sim = q[i:i + chunk] @ bank.T                            # (b, n)
+        d2 = np.clip(2.0 - 2.0 * sim, 0.0, None)                 # squared L2
+        out[i:i + chunk] = -np.sort(d2, axis=1)[:, k - 1]
+    return out
+
+
+def energy_score(logits: np.ndarray, T: float = 1.0) -> np.ndarray:
+    """Higher = more in-distribution: T·logsumexp(logits/T)."""
+    z = logits / T
+    m = z.max(axis=1, keepdims=True)
+    return (T * (m[:, 0] + np.log(np.exp(z - m).sum(axis=1)))).astype(np.float64)
 
 
 # ---------------------------------------------------------------------------
