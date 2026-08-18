@@ -104,13 +104,28 @@ def main():
     ap.add_argument("--subset", type=int, default=400,
                     help="Samples per class subset (default 400)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--fit-on", choices=["clean", "poisoned"], default="clean",
+                    help="Fit the conformity model on the clean MNIST train "
+                         "features, or on the SAME poisoned training set the "
+                         "model saw (deployment-honest: no clean feature "
+                         "source is assumed)")
+    ap.add_argument("--stats", choices=["moment", "robust"], default="moment",
+                    help="Conformity fit statistics: mean/std, or "
+                         "median/MAD (resists minority contamination of "
+                         "the training features)")
     args = ap.parse_args()
 
-    from NN.datasets import load_mnist, add_trigger_patch, mnist_get_scaling
+    from NN.datasets import load_mnist, load_data, add_trigger_patch, \
+        mnist_get_scaling
     from sklearn.metrics import roc_auc_score
 
     X_train, X_test, y_train, y_test = load_mnist()
-    itm = InputTrustModel().fit(X_train)
+    if args.fit_on == "poisoned":
+        X_fit = load_data("mnist", poisoned_patch=args.patch_size)[0]
+    else:
+        X_fit = X_train
+    itm = InputTrustModel(stats=args.stats).fit(X_fit)
+    print(f"[W7] fit-on={args.fit_on}  stats={args.stats}")
     print(f"[W7] {itm.describe()}")
     nn, ptas = load_poisoned_artifacts(args.patch_size, args.hidden, args.eps)
 
@@ -164,6 +179,8 @@ def main():
         print(f"  {k:24s} {v:.4f}")
 
     out_dir = "results/PoisonedConformity_mnist"
+    if args.fit_on != "clean" or args.stats != "moment":
+        out_dir += f"_{args.fit_on}_{args.stats}"
     os.makedirs(out_dir, exist_ok=True)
     payload = {"patch_size": args.patch_size, "hidden": args.hidden,
                "eps": args.eps, "subset": args.subset,
