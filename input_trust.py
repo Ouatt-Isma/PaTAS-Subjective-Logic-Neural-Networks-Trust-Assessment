@@ -101,7 +101,7 @@ class InputTrustModel:
     def __init__(self, floor_frac: float = 0.02, slack: float = 1.0,
                  evidence: float = 50.0, alpha: float = 2.0,
                  weight_cap: float = 64.0, W: float = 2.0,
-                 base_rate: float = 0.5):
+                 base_rate: float = 0.5, stats: str = "moment"):
         if floor_frac <= 0:
             raise ValueError("floor_frac must be > 0")
         if evidence <= 0:
@@ -117,6 +117,15 @@ class InputTrustModel:
         self.weight_cap = float(weight_cap)
         self.W = float(W)
         self.base_rate = float(base_rate)
+        if stats not in ("moment", "robust"):
+            raise ValueError("stats must be 'moment' or 'robust'")
+        # "robust" fits mu/sigma as median and 1.4826*MAD, which resist
+        # minority contamination of the training features: with a third of
+        # the images carrying a trigger patch, moment statistics inflate
+        # sigma at the patched positions and destroy exactly the reliable
+        # witnesses that detect the patch, while the majority-based robust
+        # fit leaves them intact.
+        self.stats = stats
         self.mu: np.ndarray | None = None
         self.sigma_eff: np.ndarray | None = None
         self.weights: np.ndarray | None = None
@@ -132,8 +141,12 @@ class InputTrustModel:
         X = np.asarray(X, dtype=np.float32)
         if X.ndim != 2:
             raise ValueError(f"expected (n, d) features, got shape {X.shape}")
-        self.mu = X.mean(axis=0)
-        sigma = X.std(axis=0)
+        if self.stats == "robust":
+            self.mu = np.median(X, axis=0)
+            sigma = 1.4826 * np.median(np.abs(X - self.mu), axis=0)
+        else:
+            self.mu = X.mean(axis=0)
+            sigma = X.std(axis=0)
         lo, hi = np.percentile(X, [0.5, 99.5])
         self.span = float(max(hi - lo, 1e-6))
         floor = self.floor_frac * self.span
@@ -186,7 +199,7 @@ class InputTrustModel:
     def describe(self) -> str:
         self._check_fitted()
         w = self.weights
-        return (f"InputTrustModel(floor_frac={self.floor_frac:g}, "
+        return (f"InputTrustModel(stats={self.stats}, floor_frac={self.floor_frac:g}, "
                 f"slack={self.slack:g}, evidence={self.evidence:g}, "
                 f"alpha={self.alpha:g}, weight_cap={self.weight_cap:g}, "
                 f"W={self.W:g}, span={self.span:.3f}, "
