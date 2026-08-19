@@ -87,21 +87,45 @@ def _recipe_lr(epochs):
     return lr
 
 
+# Conv scenarios are dataset-parameterized; "cifar10" keeps every legacy
+# default. MNIST digits are not mirror-invariant, so no horizontal flip.
+CONV_DATASETS = {
+    "cifar10": {"img": 32, "cin": 3, "classes": 10, "hflip": True},
+    "mnist":   {"img": 28, "cin": 1, "classes": 10, "hflip": False},
+    "fashion": {"img": 28, "cin": 1, "classes": 10, "hflip": True},
+}
+
+
+def conv_specs(dataset, base_channels):
+    from NN.convNN import cifar10_resnet_specs, default_resnet_lite_specs
+    d = CONV_DATASETS[dataset]
+    fn = cifar10_resnet_specs if dataset == "cifar10" else default_resnet_lite_specs
+    return fn(img_size=d["img"], in_channels=d["cin"],
+              num_classes=d["classes"], base_channels=base_channels)
+
+
+def _recipe_kwargs(dataset):
+    kw = dict(_RECIPE)
+    kw["hflip"] = CONV_DATASETS[dataset]["hflip"]
+    return kw
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Result caching — same naming scheme as start_ptas / start_client so that
 # run_uq_comparison.py (and future scripts) can reuse the artefacts.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _cifar_paths(x_trust: str, y_trust: str, epsilon_low: float,
-                 noise_level: float | None = None) -> tuple[str, str]:
+                 noise_level: float | None = None,
+                 dataset: str = "cifar10") -> tuple[str, str]:
     """(PTAS_Eval dir, NN_Train dir) for a CIFAR-10 ResNet-lite scenario —
     delegates to the canonical helpers in patas_module/main.py so the naming
     (including the _nl<rate> corruption suffix) can never drift from
     start_ptas / start_client / run_uq_comparison."""
     from main import nn_cache_dir, ptas_cache_dir
-    return (ptas_cache_dir("cifar10", "resnet-lite", x_trust, y_trust,
+    return (ptas_cache_dir(dataset, "resnet-lite", x_trust, y_trust,
                            epsilon_low, noise_level=noise_level),
-            nn_cache_dir("cifar10", "resnet-lite", x_trust, y_trust,
+            nn_cache_dir(dataset, "resnet-lite", x_trust, y_trust,
                          noise_level=noise_level))
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -109,7 +133,8 @@ def _cifar_paths(x_trust: str, y_trust: str, epsilon_low: float,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _ptas_worker(result_queue, ready_event, port, x_trust, y_trust,
-                 epsilon_low, base_channels, noise_level=None) -> None:
+                 epsilon_low, base_channels, noise_level=None,
+                 dataset="cifar10") -> None:
     """PTASConv server subprocess mirroring the CIFAR-10 ResNet.
 
     Mirrors start_ptas: loads omega_arrays.pkl when cached (skipping training)
@@ -126,9 +151,7 @@ def _ptas_worker(result_queue, ready_event, port, x_trust, y_trust,
         from concrete.TensorTO import TensorArrayTO, fill as tfill, as_tensor
         from main import build_trust_generator, ptas_evaluation
 
-        specs = cifar10_resnet_specs(img_size=_IMG_SIZE, in_channels=_IN_CHANNELS,
-                                     num_classes=_NUM_CLASSES,
-                                     base_channels=base_channels)
+        specs = conv_specs(dataset, base_channels)
         out_dim = specs[-1]["out"]
         x_gen = build_trust_generator(x_trust)
         y_gen = build_trust_generator(y_trust)
@@ -147,7 +170,8 @@ def _ptas_worker(result_queue, ready_event, port, x_trust, y_trust,
         )
         print(f"[PTASConv] Device: {ptas.device}")
 
-        datapath, _ = _cifar_paths(x_trust, y_trust, epsilon_low, noise_level)
+        datapath, _ = _cifar_paths(x_trust, y_trust, epsilon_low, noise_level,
+                                   dataset=dataset)
         omega_path = os.path.join(datapath, "omega_arrays.pkl")
         expected_shapes = [(r, c, 3) for r, c in spec_omega_shapes(specs)]
 
@@ -174,7 +198,8 @@ def _ptas_worker(result_queue, ready_event, port, x_trust, y_trust,
         if not loaded:
             ptas.run_chunk(ready_event=ready_event)
 
-        input_dim = _IN_CHANNELS * _IMG_SIZE * _IMG_SIZE
+        d = CONV_DATASETS[dataset]
+        input_dim = d["cin"] * d["img"] * d["img"]
         # Writes evaluation_log.txt, at/av/ad.pkl and omega_arrays.pkl
         ptas_evaluation(ptas, input_dim, datapath=datapath)
         results = {}
@@ -200,7 +225,7 @@ def _ptas_worker(result_queue, ready_event, port, x_trust, y_trust,
 
 def _client_worker(result_queue, port, epochs, x_trust, y_trust,
                    base_channels, ptas=True, epsilon_low=_DEFAULT_EPS,
-                   noise_level=None, recipe=False) -> None:
+                   noise_level=None, recipe=False, dataset="cifar10") -> None:
     """CIFAR-10 ResNet client subprocess.
 
     Mirrors start_client: caches nn_model.pkl + metrics.txt in the NN_Train
@@ -215,7 +240,7 @@ def _client_worker(result_queue, port, epochs, x_trust, y_trust,
         from main import TRUST_TO_DATASET
 
         ptas_dir, datapath = _cifar_paths(x_trust, y_trust, epsilon_low,
-                                          noise_level)
+                                          noise_level, dataset=dataset)
         os.makedirs(datapath, exist_ok=True)
         nn_model_path = os.path.join(datapath, "nn_model.pkl")
         metrics_path = os.path.join(datapath, "metrics.txt")
@@ -227,13 +252,12 @@ def _client_worker(result_queue, port, epochs, x_trust, y_trust,
         y_how = TRUST_TO_DATASET.get(y_trust, "clean")
         _load_kwargs = {} if noise_level is None else {"noise_level": noise_level}
         X_train, X_test, y_train, y_test, _ = load_data(
-            "cifar10", x_how, y_how, **_load_kwargs)
+            dataset, x_how, y_how, **_load_kwargs)
 
-        specs = cifar10_resnet_specs(img_size=_IMG_SIZE, in_channels=_IN_CHANNELS,
-                                     num_classes=_NUM_CLASSES,
-                                     base_channels=base_channels)
-        net = ConvNet(img_size=_IMG_SIZE, in_channels=_IN_CHANNELS,
-                      num_classes=_NUM_CLASSES, specs=specs,
+        d = CONV_DATASETS[dataset]
+        specs = conv_specs(dataset, base_channels)
+        net = ConvNet(img_size=d["img"], in_channels=d["cin"],
+                      num_classes=d["classes"], specs=specs,
                       ptas=ptas and not ptas_omega_cached,
                       operation=True, port=port)
         print(f"[ConvNet] Device: {net.device}")
@@ -246,7 +270,7 @@ def _client_worker(result_queue, port, epochs, x_trust, y_trust,
                 net.train(X_train, y_train, X_test, y_test,
                           epochs=epochs, batch_size=128,
                           lr_scheduler=(_recipe_lr(epochs) if recipe else (lambda e: _LR)),
-                          **(_RECIPE if recipe else {}))
+                          **(_recipe_kwargs(dataset) if recipe else {}))
             net.end()
             m = {}
             with open(metrics_path, encoding="utf-8") as fh:
@@ -260,7 +284,7 @@ def _client_worker(result_queue, port, epochs, x_trust, y_trust,
             hist = net.train(X_train, y_train, X_test, y_test,
                              epochs=epochs, batch_size=128,
                              lr_scheduler=(_recipe_lr(epochs) if recipe else (lambda e: _LR)),
-                          **(_RECIPE if recipe else {}))
+                          **(_recipe_kwargs(dataset) if recipe else {}))
             net.end()
             train_acc = hist["train_acc"][-1] if hist["train_acc"] else float("nan")
             test_acc = hist["test_acc"][-1] if hist["test_acc"] else float("nan")
@@ -282,7 +306,8 @@ def run_cifar_resnet_scenario(epochs: int = _DEFAULT_EPOCHS,
                               epsilon_low: float = _DEFAULT_EPS,
                               base_channels: int = 16,
                               noise_level: float | None = None,
-                              recipe: bool = False) -> dict[str, Any]:
+                              recipe: bool = False,
+                              dataset: str = "cifar10") -> dict[str, Any]:
     """Two-process PTASConv + CIFAR-ResNet run; returns trust masses + accuracies."""
     ptas_q: "multiprocessing.Queue[dict]" = multiprocessing.Queue()
     client_q: "multiprocessing.Queue[dict]" = multiprocessing.Queue()
@@ -291,14 +316,14 @@ def run_cifar_resnet_scenario(epochs: int = _DEFAULT_EPOCHS,
     ptas_proc = multiprocessing.Process(
         target=_ptas_worker,
         args=(ptas_q, ready_event, port, x_trust, y_trust, epsilon_low,
-              base_channels, noise_level))
+              base_channels, noise_level, dataset))
     ptas_proc.start()
     ready_event.wait(timeout=60)
 
     client_proc = multiprocessing.Process(
         target=_client_worker,
         args=(client_q, port, epochs, x_trust, y_trust, base_channels,
-              True, epsilon_low, noise_level, recipe))
+              True, epsilon_low, noise_level, recipe, dataset))
     client_proc.start()
 
     _QUEUE_TIMEOUT = 14400   # CIFAR CPU runs are slow; generous upper bound
