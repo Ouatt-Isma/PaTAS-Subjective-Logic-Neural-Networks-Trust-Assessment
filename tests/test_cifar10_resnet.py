@@ -70,6 +70,23 @@ _IN_CHANNELS    = 3
 _NUM_CLASSES    = 10
 _LR             = 0.05
 
+# Upgraded CIFAR recipe (momentum SGD + weight decay + augmentation with a
+# step LR schedule). Off by default so legacy caches stay reproducible;
+# jobs pass recipe=True for the defensible-accuracy training.
+_RECIPE = {"momentum": 0.9, "weight_decay": 5e-4, "augment": True}
+
+
+def _recipe_lr(epochs):
+    """0.1 stepped down 10x at 60% and 85% of the run."""
+    def lr(e):
+        if e < 0.6 * epochs:
+            return 0.1
+        if e < 0.85 * epochs:
+            return 0.01
+        return 0.001
+    return lr
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Result caching — same naming scheme as start_ptas / start_client so that
 # run_uq_comparison.py (and future scripts) can reuse the artefacts.
@@ -183,7 +200,7 @@ def _ptas_worker(result_queue, ready_event, port, x_trust, y_trust,
 
 def _client_worker(result_queue, port, epochs, x_trust, y_trust,
                    base_channels, ptas=True, epsilon_low=_DEFAULT_EPS,
-                   noise_level=None) -> None:
+                   noise_level=None, recipe=False) -> None:
     """CIFAR-10 ResNet client subprocess.
 
     Mirrors start_client: caches nn_model.pkl + metrics.txt in the NN_Train
@@ -228,7 +245,8 @@ def _client_worker(result_queue, port, epochs, x_trust, y_trust,
                 # Replay training to feed the gradient stream to PTAS
                 net.train(X_train, y_train, X_test, y_test,
                           epochs=epochs, batch_size=128,
-                          lr_scheduler=lambda e: _LR)
+                          lr_scheduler=(_recipe_lr(epochs) if recipe else (lambda e: _LR)),
+                          **(_RECIPE if recipe else {}))
             net.end()
             m = {}
             with open(metrics_path, encoding="utf-8") as fh:
@@ -241,7 +259,8 @@ def _client_worker(result_queue, port, epochs, x_trust, y_trust,
         else:
             hist = net.train(X_train, y_train, X_test, y_test,
                              epochs=epochs, batch_size=128,
-                             lr_scheduler=lambda e: _LR)
+                             lr_scheduler=(_recipe_lr(epochs) if recipe else (lambda e: _LR)),
+                          **(_RECIPE if recipe else {}))
             net.end()
             train_acc = hist["train_acc"][-1] if hist["train_acc"] else float("nan")
             test_acc = hist["test_acc"][-1] if hist["test_acc"] else float("nan")
@@ -262,7 +281,8 @@ def run_cifar_resnet_scenario(epochs: int = _DEFAULT_EPOCHS,
                               x_trust: str = "trust", y_trust: str = "trust",
                               epsilon_low: float = _DEFAULT_EPS,
                               base_channels: int = 16,
-                              noise_level: float | None = None) -> dict[str, Any]:
+                              noise_level: float | None = None,
+                              recipe: bool = False) -> dict[str, Any]:
     """Two-process PTASConv + CIFAR-ResNet run; returns trust masses + accuracies."""
     ptas_q: "multiprocessing.Queue[dict]" = multiprocessing.Queue()
     client_q: "multiprocessing.Queue[dict]" = multiprocessing.Queue()
@@ -278,7 +298,7 @@ def run_cifar_resnet_scenario(epochs: int = _DEFAULT_EPOCHS,
     client_proc = multiprocessing.Process(
         target=_client_worker,
         args=(client_q, port, epochs, x_trust, y_trust, base_channels,
-              True, epsilon_low, noise_level))
+              True, epsilon_low, noise_level, recipe))
     client_proc.start()
 
     _QUEUE_TIMEOUT = 14400   # CIFAR CPU runs are slow; generous upper bound
