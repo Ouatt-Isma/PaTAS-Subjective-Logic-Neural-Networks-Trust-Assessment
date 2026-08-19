@@ -288,8 +288,9 @@ def get_base_convnet(X_train, y_train, X_test, y_test, epochs: int,
             f"Run tests/test_cifar10_resnet.py first or pass --train-missing.")
     print(f"[BASE] Training CIFAR-10 ResNet-lite ({x_trust}/{y_trust}, "
           f"no PaTAS attached){' — forced retrain' if cached else ''} ...")
+    from test_cifar10_resnet import _recipe_lr, _RECIPE
     hist = net.train(X_train, y_train, X_test, y_test, epochs=epochs,
-                     batch_size=128, lr_scheduler=_lr_for("cifar10"))
+                     batch_size=128, lr_scheduler=_recipe_lr(epochs), **_RECIPE)
     os.makedirs(nn_dir, exist_ok=True)
     net.save_model(model_path)
     writedict({"Train": hist["train_acc"][-1] if hist["train_acc"] else float("nan"),
@@ -364,6 +365,34 @@ def _discounted_confidence(trust: np.ndarray, conf: np.ndarray,
     so the score keeps its "claimed probability of being correct" reading.
     """
     return trust * conf + (1.0 - trust) / float(n_classes)
+
+
+def load_offline_conv_ptas(eps: float, x_trust: str = "trust",
+                           y_trust: str = "trust",
+                           noise_level: Optional[float] = None):
+    """Rebuild a PTASConv from the cached CIFAR omega_arrays.pkl (no socket),
+    enabling per-sample conv IPTA at scoring time."""
+    from NN.convPTAS import PTASConv
+    from NN.convNN import cifar10_resnet_specs
+    from concrete.TensorTO import TensorArrayTO, as_tensor
+
+    cfgd = DATASET_CFG["cifar10"]
+    omega_path = os.path.join(
+        _ptas_dir("cifar10", "resnet-lite", eps, "average", x_trust, y_trust,
+                  noise_level=noise_level), "omega_arrays.pkl")
+    if not os.path.exists(omega_path):
+        return None
+    with open(omega_path, "rb") as fh:
+        omega_arrays = pickle.load(fh)
+    specs = cifar10_resnet_specs(img_size=cfgd["img_size"],
+                                 in_channels=cfgd["in_channels"],
+                                 num_classes=cfgd["output_dim"],
+                                 base_channels=cfgd["base_channels"])
+    ptas = PTASConv(specs, nn_interface=None, trust_assessment_func=None,
+                    epsilon_low=eps, eval=False)
+    for i, arr in enumerate(omega_arrays):
+        ptas.omega_thetas[i] = TensorArrayTO(as_tensor(arr, device=ptas.device))
+    return ptas
 
 
 def patas_ipta_scores(ptas, base_nn, X: np.ndarray, input_dim: int,
@@ -448,6 +477,66 @@ def patas_ipta_scores(ptas, base_nn, X: np.ndarray, input_dim: int,
     if n_fail:
         print(f"  [PaTAS] {n_fail}/{len(X)} IPTA scorings failed; first error:\n"
               f"{first_err}")
+    return {"score": _discounted_confidence(trust, conf, n_classes),
+            "trust": trust, "conf": conf,
+            "model_trust": model_trust, "input_trust": input_trust}
+
+
+def patas_conv_ipta_scores(ptas, base_nn, X: np.ndarray, input_dim: int,
+                           itm: Optional[InputTrustModel] = None,
+                           score_mode: str = "serial") -> dict:
+    """Per-sample conv IPTA scoring (mirrors patas_ipta_scores).
+
+    The activation path of a conv network is the per-layer channel
+    participation (fraction of spatial positions with positive post-ReLU
+    output); GenIPTA weights each channel's contribution accordingly, the
+    activity-weighted generalization of the MLP's binary neuron pruning
+    (exact reduction for binary activities). Scores follow the same serial
+    SL discounting and class-prior anchoring as the MLP variant.
+    """
+    from concrete.TensorTO import TensorArrayTO, fill as tfill
+    from tqdm import tqdm
+
+    if score_mode not in ("serial", "propagated"):
+        raise ValueError(f"unknown score_mode: {score_mode!r}")
+    n_classes = int(ptas._output_dim())
+    Tx_const = TensorArrayTO(tfill((1, input_dim), method="trust"))
+    propagate_input = itm is not None and score_mode == "propagated"
+    input_ops = itm.opinions(X) if propagate_input else None
+    input_trust = (itm.sample_trust(X) if itm is not None
+                   else np.full(len(X), np.nan))
+    trust = np.full(len(X), np.nan)
+    model_trust = np.full(len(X), np.nan)
+    conf = np.full(len(X), np.nan)
+    n_fail, first_err = 0, None
+    silent = io.StringIO()
+    for i in tqdm(range(len(X)), desc="PaTAS conv-IPTA", ncols=90):
+        try:
+            with contextlib.redirect_stdout(silent):
+                probs, acts = base_nn.forward(X[i:i + 1], getactivated=True)
+                ipta = ptas.GenIPTA([a[0] for a in acts])
+                Ty_m = ipta(Tx_const)
+                Ty = (ipta(TensorArrayTO(input_ops[i:i + 1]))
+                      if propagate_input else Ty_m)
+            pred = int(np.argmax(probs, axis=1)[0])
+            op_m = np.asarray(Ty_m.to_numpy())[0, pred]
+            model_trust[i] = float(op_m[0] + 0.5 * op_m[2])
+            if propagate_input:
+                op = np.asarray(Ty.to_numpy())[0, pred]
+                trust[i] = float(op[0] + 0.5 * op[2])
+            elif itm is not None:
+                trust[i] = model_trust[i] * float(input_trust[i])
+            else:
+                trust[i] = model_trust[i]
+            conf[i] = float(np.max(probs))
+        except Exception:                                   # noqa: BLE001
+            n_fail += 1
+            if first_err is None:
+                import traceback
+                first_err = traceback.format_exc()
+    if n_fail:
+        print(f"  [PaTAS] {n_fail}/{len(X)} conv-IPTA scorings failed; "
+              f"first error:\n{first_err}")
     return {"score": _discounted_confidence(trust, conf, n_classes),
             "trust": trust, "conf": conf,
             "model_trust": model_trust, "input_trust": input_trust}
@@ -580,7 +669,8 @@ def ensure_cifar_cache(x_trust: str, y_trust: str, eps: float, epochs: int,
     cfgd = DATASET_CFG["cifar10"]
     run_cifar_resnet_scenario(
         epochs=epochs, port=cfgd["port"], x_trust=x_trust, y_trust=y_trust,
-        epsilon_low=eps, base_channels=base_channels, noise_level=noise_level)
+        epsilon_low=eps, base_channels=base_channels, noise_level=noise_level,
+        recipe=True)
     ok = os.path.exists(omega_path) and os.path.exists(nn_model_path)
     if not ok:
         print(f"[PaTAS/CIFAR] Training attempt did NOT produce {omega_path} "
@@ -762,11 +852,21 @@ def score_all_methods(Xn, ys, dataset, arch, cfgd, args, is_conv,
     # ---- PaTAS filter: belief-anchored trust-discounted confidence ----------
     sc = None
     if is_conv:
-        sc = patas_class_trust_scores(dataset, arch, args.eps, probs_base,
-                                      fuse_method=args.fuse_method,
-                                      x_trust=cond.x_trust, y_trust=cond.y_trust,
-                                      noise_level=cond.noise_level,
-                                      itm=itm, X=Xn)
+        if getattr(args, "conv_score", "ipta") == "ipta" and ptas is not None:
+            t0 = time.time()
+            sc = patas_conv_ipta_scores(ptas, base, Xn, cfgd["input_dim"],
+                                        itm=itm, score_mode=args.patas_score)
+            print(f"  PaTAS conv-IPTA scoring: {time.time()-t0:.1f}s "
+                  f"({int(np.isnan(sc['score']).sum())} failures)  "
+                  f"mean trust={np.nanmean(sc['trust']):.4f}  "
+                  f"(model-side {np.nanmean(sc['model_trust']):.4f}, "
+                  f"input-side {np.nanmean(sc['input_trust']):.4f})")
+        else:
+            sc = patas_class_trust_scores(dataset, arch, args.eps, probs_base,
+                                          fuse_method=args.fuse_method,
+                                          x_trust=cond.x_trust, y_trust=cond.y_trust,
+                                          noise_level=cond.noise_level,
+                                          itm=itm, X=Xn)
     elif ptas is not None:
         t0 = time.time()
         sc = patas_ipta_scores(ptas, base, Xn, cfgd["input_dim"], itm=itm,
@@ -955,6 +1055,12 @@ def run_condition(dataset: str, cond: TrainCondition, args,
                             force_retrain=args.force_retrain_all)
 
     ptas = None
+    if is_conv and getattr(args, "conv_score", "ipta") == "ipta":
+        ptas = load_offline_conv_ptas(args.eps, cond.x_trust, cond.y_trust,
+                                      noise_level=cond.noise_level)
+        if ptas is None:
+            print("  [PaTAS/conv] omega cache missing — falling back to "
+                  "class-level trust (at.pkl).")
     if not is_conv and ensure_patas_cache(dataset, arch, args.eps, args.epochs,
                                           args.train_missing,
                                           fuse_method=args.fuse_method,
@@ -1478,6 +1584,12 @@ def parse_args():
                         "statistics; 'constant' reproduces the historical "
                         "fully-trusted input (ablation: the PaTAS score then "
                         "carries no per-sample input information)")
+    p.add_argument("--conv-score", choices=["ipta", "classlevel"],
+                   default="ipta",
+                   help="Conv (CIFAR-10) PaTAS scoring: 'ipta' (default) "
+                        "uses per-sample activity-weighted conv IPTA; "
+                        "'classlevel' keeps the earlier class-level "
+                        "output-trust fallback (ablation)")
     p.add_argument("--patas-score",
                    choices=["serial", "propagated"], default="serial",
                    help="How model-side and input-side trust combine: "
