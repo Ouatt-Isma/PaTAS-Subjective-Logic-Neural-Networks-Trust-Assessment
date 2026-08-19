@@ -729,5 +729,8 @@ if __name__ == "__main__":
     plt.close(fig)
     print(f"\n  Saved {os.path.join(plots_dir, 'latency.pdf')}")
 
-    _write_tables(inf_results, {}, tables_dir)
+    print("\n[B] Training latency benchmark (in-process, clean condition) ...")
+    train_results = run_training_inprocess_benchmark(ds)
+
+    _write_tables(inf_results, train_results, tables_dir)
     print("Done.")

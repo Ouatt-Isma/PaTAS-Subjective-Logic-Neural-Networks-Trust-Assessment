@@ -159,14 +159,25 @@ DATASET_CFG = {
     "fashion": {"arch": (128,),  "input_dim": 28 * 28, "output_dim": 10, "port": 5271},
     "gtsrb":   {"arch": (128,),  "input_dim": 32 * 32, "output_dim": 43, "port": 5251},
     "cifar10": {"arch": "resnet-lite", "input_dim": 3 * 32 * 32, "output_dim": 10,
-                "port": 5261, "img_size": 32, "in_channels": 3, "base_channels": 16},
+                "port": 5261, "img_size": 32, "in_channels": 3, "base_channels": 16,
+                "conv": True, "base": "cifar10"},
+    # CNN variants of the registered-domain datasets: the full per-sample
+    # conv-IPTA battery on an architecture that is defensible for the
+    # domain (~99% MNIST with the upgraded recipe).
+    "mnistconv":   {"arch": "resnet-lite", "input_dim": 28 * 28, "output_dim": 10,
+                    "port": 5281, "img_size": 28, "in_channels": 1,
+                    "base_channels": 16, "conv": True, "base": "mnist"},
+    "fashionconv": {"arch": "resnet-lite", "input_dim": 28 * 28, "output_dim": 10,
+                    "port": 5291, "img_size": 28, "in_channels": 1,
+                    "base_channels": 16, "conv": True, "base": "fashion"},
 }
 
 
 def _lr_for(dataset: str):
     from main import get_lr_mnist, get_lr_gtsrb
     return {"mnist": get_lr_mnist, "fashion": get_lr_mnist,
-            "gtsrb": get_lr_gtsrb, "cifar10": get_lr_mnist}[dataset]
+            "gtsrb": get_lr_gtsrb, "cifar10": get_lr_mnist,
+            "mnistconv": get_lr_mnist, "fashionconv": get_lr_mnist}[dataset]
 
 
 def _arch_str(arch) -> str:
@@ -263,16 +274,16 @@ def get_base_convnet(X_train, y_train, X_test, y_test, epochs: int,
                      train_missing: bool,
                      x_trust: str = "trust", y_trust: str = "trust",
                      noise_level: Optional[float] = None,
-                     force_retrain: bool = False):
-    from NN.convNN import ConvNet, cifar10_resnet_specs
+                     force_retrain: bool = False,
+                     dataset: str = "cifar10"):
+    from NN.convNN import ConvNet
     from NN.utils import writedict
+    from test_cifar10_resnet import conv_specs
 
-    cfg = DATASET_CFG["cifar10"]
-    specs = cifar10_resnet_specs(img_size=cfg["img_size"],
-                                 in_channels=cfg["in_channels"],
-                                 num_classes=cfg["output_dim"],
-                                 base_channels=cfg["base_channels"])
-    nn_dir = _nn_dir("cifar10", "resnet-lite", x_trust, y_trust,
+    cfg = DATASET_CFG[dataset]
+    base = cfg.get("base", dataset)
+    specs = conv_specs(base, cfg["base_channels"])
+    nn_dir = _nn_dir(base, "resnet-lite", x_trust, y_trust,
                      noise_level=noise_level)
     model_path = os.path.join(nn_dir, "nn_model.pkl")
     net = ConvNet(img_size=cfg["img_size"], in_channels=cfg["in_channels"],
@@ -286,11 +297,12 @@ def get_base_convnet(X_train, y_train, X_test, y_test, epochs: int,
         raise FileNotFoundError(
             f"Base ConvNet not found: {model_path}\n"
             f"Run tests/test_cifar10_resnet.py first or pass --train-missing.")
-    print(f"[BASE] Training CIFAR-10 ResNet-lite ({x_trust}/{y_trust}, "
+    print(f"[BASE] Training {base} ResNet-lite ({x_trust}/{y_trust}, "
           f"no PaTAS attached){' — forced retrain' if cached else ''} ...")
-    from test_cifar10_resnet import _recipe_lr, _RECIPE
+    from test_cifar10_resnet import _recipe_lr, _recipe_kwargs
     hist = net.train(X_train, y_train, X_test, y_test, epochs=epochs,
-                     batch_size=128, lr_scheduler=_recipe_lr(epochs), **_RECIPE)
+                     batch_size=128, lr_scheduler=_recipe_lr(epochs),
+                     **_recipe_kwargs(base))
     os.makedirs(nn_dir, exist_ok=True)
     net.save_model(model_path)
     writedict({"Train": hist["train_acc"][-1] if hist["train_acc"] else float("nan"),
@@ -369,25 +381,24 @@ def _discounted_confidence(trust: np.ndarray, conf: np.ndarray,
 
 def load_offline_conv_ptas(eps: float, x_trust: str = "trust",
                            y_trust: str = "trust",
-                           noise_level: Optional[float] = None):
+                           noise_level: Optional[float] = None,
+                           dataset: str = "cifar10"):
     """Rebuild a PTASConv from the cached CIFAR omega_arrays.pkl (no socket),
     enabling per-sample conv IPTA at scoring time."""
     from NN.convPTAS import PTASConv
-    from NN.convNN import cifar10_resnet_specs
     from concrete.TensorTO import TensorArrayTO, as_tensor
+    from test_cifar10_resnet import conv_specs
 
-    cfgd = DATASET_CFG["cifar10"]
+    cfgd = DATASET_CFG[dataset]
+    base = cfgd.get("base", dataset)
     omega_path = os.path.join(
-        _ptas_dir("cifar10", "resnet-lite", eps, "average", x_trust, y_trust,
+        _ptas_dir(base, "resnet-lite", eps, "average", x_trust, y_trust,
                   noise_level=noise_level), "omega_arrays.pkl")
     if not os.path.exists(omega_path):
         return None
     with open(omega_path, "rb") as fh:
         omega_arrays = pickle.load(fh)
-    specs = cifar10_resnet_specs(img_size=cfgd["img_size"],
-                                 in_channels=cfgd["in_channels"],
-                                 num_classes=cfgd["output_dim"],
-                                 base_channels=cfgd["base_channels"])
+    specs = conv_specs(base, cfgd["base_channels"])
     ptas = PTASConv(specs, nn_interface=None, trust_assessment_func=None,
                     epsilon_low=eps, eval=False)
     for i, arr in enumerate(omega_arrays):
@@ -557,7 +568,8 @@ def patas_class_trust_scores(dataset: str, arch, eps: float,
     score is the same belief-anchored discounted confidence as the IPTA
     variant."""
     at_path = os.path.join(
-        _ptas_dir(dataset, arch, eps, fuse_method, x_trust, y_trust,
+        _ptas_dir(DATASET_CFG.get(dataset, {}).get("base", dataset), arch, eps,
+                  fuse_method, x_trust, y_trust,
                   noise_level=noise_level), "at.pkl")
     if not os.path.exists(at_path):
         return None
@@ -633,7 +645,9 @@ def ensure_patas_cache(dataset: str, arch: tuple, eps: float, epochs: int,
 def ensure_cifar_cache(x_trust: str, y_trust: str, eps: float, epochs: int,
                        base_channels: int, train_missing: bool,
                        noise_level: Optional[float] = None,
-                       force_retrain: bool = False) -> bool:
+                       force_retrain: bool = False,
+                       dataset: str = "cifar10") -> bool:
+    base = DATASET_CFG[dataset].get("base", dataset)
     """Make sure the CIFAR-10 ResNet-lite PTAS+NN caches exist for the given
     (x_trust, y_trust) training condition; optionally run the scenario.
 
@@ -642,9 +656,9 @@ def ensure_cifar_cache(x_trust: str, y_trust: str, eps: float, epochs: int,
     (nn_model.pkl, metrics.txt) directories that get_base_convnet and
     patas_class_trust_scores read from — no duplicate training.
     """
-    ptas_dir = _ptas_dir("cifar10", "resnet-lite", eps, "average", x_trust, y_trust,
+    ptas_dir = _ptas_dir(base, "resnet-lite", eps, "average", x_trust, y_trust,
                          noise_level=noise_level)
-    nn_dir = _nn_dir("cifar10", "resnet-lite", x_trust, y_trust,
+    nn_dir = _nn_dir(base, "resnet-lite", x_trust, y_trust,
                      noise_level=noise_level)
     omega_path = os.path.join(ptas_dir, "omega_arrays.pkl")
     nn_model_path = os.path.join(nn_dir, "nn_model.pkl")
@@ -666,11 +680,11 @@ def ensure_cifar_cache(x_trust: str, y_trust: str, eps: float, epochs: int,
     print(f"[PaTAS/CIFAR] Training scenario for cifar10 resnet-lite eps={eps} "
           f"{x_trust}/{y_trust}{' (forced retrain)' if cached else ''} ...")
     from test_cifar10_resnet import run_cifar_resnet_scenario
-    cfgd = DATASET_CFG["cifar10"]
+    cfgd = DATASET_CFG[dataset]
     run_cifar_resnet_scenario(
         epochs=epochs, port=cfgd["port"], x_trust=x_trust, y_trust=y_trust,
         epsilon_low=eps, base_channels=base_channels, noise_level=noise_level,
-        recipe=True)
+        recipe=True, dataset=base)
     ok = os.path.exists(omega_path) and os.path.exists(nn_model_path)
     if not ok:
         print(f"[PaTAS/CIFAR] Training attempt did NOT produce {omega_path} "
@@ -1006,8 +1020,8 @@ def run_condition(dataset: str, cond: TrainCondition, args,
     x_how = TRUST_TO_DATASET.get(cond.x_trust, "clean")
     y_how = TRUST_TO_DATASET.get(cond.y_trust, "clean")
     _load_kwargs = {} if cond.noise_level is None else {"noise_level": cond.noise_level}
-    X_train, X_test, y_train, y_test, _ = load_data(dataset, x_how, y_how,
-                                                     **_load_kwargs)
+    X_train, X_test, y_train, y_test, _ = load_data(
+        cfgd.get("base", dataset), x_how, y_how, **_load_kwargs)
     y_test_lbl = y_test.argmax(1)
 
     rng = np.random.default_rng(args.seed)
@@ -1023,7 +1037,7 @@ def run_condition(dataset: str, cond: TrainCondition, args,
     calib_idx = rng.choice(remaining, size=n_calib, replace=False) if n_calib > 0 else remaining
     Xc, yc = X_test[calib_idx], y_test_lbl[calib_idx]
 
-    is_conv = dataset == "cifar10"
+    is_conv = bool(cfgd.get("conv", False))
 
     # ---- Input-trust model: per-feature conformity statistics learned from
     # the (clean-featured) training data of this condition -------------------
@@ -1041,12 +1055,14 @@ def run_condition(dataset: str, cond: TrainCondition, args,
     if is_conv:
         ensure_cifar_cache(cond.x_trust, cond.y_trust, args.eps, args.epochs,
                            cfgd["base_channels"], args.train_missing,
-                           cond.noise_level, force_retrain=args.force_retrain_all)
+                           cond.noise_level, force_retrain=args.force_retrain_all,
+                           dataset=dataset)
         base, specs = get_base_convnet(X_train, y_train, X_test, y_test,
                                        args.epochs, args.train_missing,
                                        cond.x_trust, cond.y_trust,
                                        noise_level=cond.noise_level,
-                                       force_retrain=args.force_retrain_all)
+                                       force_retrain=args.force_retrain_all,
+                                       dataset=dataset)
     else:
         base = get_base_mlp(dataset, arch, X_train, y_train, X_test, y_test,
                             args.epochs, args.train_missing,
@@ -1057,7 +1073,8 @@ def run_condition(dataset: str, cond: TrainCondition, args,
     ptas = None
     if is_conv and getattr(args, "conv_score", "ipta") == "ipta":
         ptas = load_offline_conv_ptas(args.eps, cond.x_trust, cond.y_trust,
-                                      noise_level=cond.noise_level)
+                                      noise_level=cond.noise_level,
+                                      dataset=dataset)
         if ptas is None:
             print("  [PaTAS/conv] omega cache missing — falling back to "
                   "class-level trust (at.pkl).")
@@ -1152,7 +1169,9 @@ def run_condition(dataset: str, cond: TrainCondition, args,
 
     # ---- Evaluate on every test condition -------------------------------------
     title = {"mnist": "MNIST", "fashion": "Fashion-MNIST",
-             "gtsrb": "GTSRB", "cifar10": "CIFAR-10"}[dataset]
+             "gtsrb": "GTSRB", "cifar10": "CIFAR-10",
+             "mnistconv": "MNIST (CNN)",
+             "fashionconv": "Fashion-MNIST (CNN)"}[dataset]
     full_title = f"{title} — {cond.label}" if cond.tag else title
     metrics_by_tag: dict = {}
     tex_conditions: list = []
@@ -1230,7 +1249,8 @@ def run_condition(dataset: str, cond: TrainCondition, args,
     ood_name = args.ood_dataset
     if ood_name == "auto":
         ood_name = {"mnist": "fashion", "fashion": "mnistood",
-                    "gtsrb": "cifar10gray"}.get(dataset, "none")
+                    "gtsrb": "cifar10gray", "mnistconv": "fashion",
+                    "fashionconv": "mnistood"}.get(dataset, "none")
     _OOD_SPECS = {"fashion": ("FashionMNIST", 28 * 28),
                   "mnistood": ("MNIST", 28 * 28),
                   "cifar10gray": ("CIFAR-10 (grayscale)", 32 * 32)}
@@ -1669,7 +1689,7 @@ def main():
         args.label_noise = [0.3]
     datasets = list(DATASET_CFG) if args.dataset == "all" else [args.dataset]
     for ds in datasets:
-        if args.arch and ds != "cifar10":
+        if args.arch and not DATASET_CFG[ds].get("conv"):
             DATASET_CFG[ds]["arch"] = tuple(args.arch)
         run(ds, args)
     print("\n=== UQ comparison complete ===\n")
