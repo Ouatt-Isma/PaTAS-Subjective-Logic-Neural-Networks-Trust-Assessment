@@ -76,14 +76,17 @@ _LR             = 0.05
 _RECIPE = {"momentum": 0.9, "weight_decay": 5e-4, "augment": True}
 
 
-def _recipe_lr(epochs):
-    """0.1 stepped down 10x at 60% and 85% of the run."""
+def _recipe_lr(epochs, dataset="cifar10"):
+    """Base LR stepped down 10x at 60% and 85% of the run. The deeper
+    batchnorm-free CIFAR net needs the gentler base rate (0.1 diverges
+    from epoch 1); the shallow 28x28 nets take 0.1."""
+    base = {"cifar10": 0.05, "mnist": 0.1, "fashion": 0.1}.get(dataset, 0.05)
     def lr(e):
         if e < 0.6 * epochs:
-            return 0.1
+            return base
         if e < 0.85 * epochs:
-            return 0.01
-        return 0.001
+            return base * 0.1
+        return base * 0.01
     return lr
 
 
@@ -269,7 +272,7 @@ def _client_worker(result_queue, port, epochs, x_trust, y_trust,
                 # Replay training to feed the gradient stream to PTAS
                 net.train(X_train, y_train, X_test, y_test,
                           epochs=epochs, batch_size=128,
-                          lr_scheduler=(_recipe_lr(epochs) if recipe else (lambda e: _LR)),
+                          lr_scheduler=(_recipe_lr(epochs, dataset) if recipe else (lambda e: _LR)),
                           **(_recipe_kwargs(dataset) if recipe else {}))
             net.end()
             m = {}
@@ -283,7 +286,7 @@ def _client_worker(result_queue, port, epochs, x_trust, y_trust,
         else:
             hist = net.train(X_train, y_train, X_test, y_test,
                              epochs=epochs, batch_size=128,
-                             lr_scheduler=(_recipe_lr(epochs) if recipe else (lambda e: _LR)),
+                             lr_scheduler=(_recipe_lr(epochs, dataset) if recipe else (lambda e: _LR)),
                           **(_recipe_kwargs(dataset) if recipe else {}))
             net.end()
             train_acc = hist["train_acc"][-1] if hist["train_acc"] else float("nan")

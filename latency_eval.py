@@ -700,7 +700,7 @@ if __name__ == "__main__":
 
     if args.data_dir is None:
         print("No data dir — using synthetic 5G dataset ...")
-        data_dir = make_synthetic_5g(n_bs=20, n_hours=72, cells_per_bs=2, seed=0)
+        data_dir = make_synthetic_5g(n_bs=40, n_hours=336, cells_per_bs=2, seed=0)
     else:
         data_dir = args.data_dir
 

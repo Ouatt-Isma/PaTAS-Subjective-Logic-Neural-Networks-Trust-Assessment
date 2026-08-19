@@ -41,3 +41,6 @@ done
 # label-noise condition carries the architecture-transferable model-side
 # result (parameter trust under corrupted training).
 python $REPO/run_uq_comparison.py --dataset cifar10 --epochs 60 --train-missing --seeds 0 1 2
+
+# Rerun the training-latency benchmark at the enlarged scale.
+python $REPO/latency_eval.py results/latency_review
