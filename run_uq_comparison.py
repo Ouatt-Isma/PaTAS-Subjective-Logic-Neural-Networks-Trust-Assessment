@@ -301,7 +301,7 @@ def get_base_convnet(X_train, y_train, X_test, y_test, epochs: int,
           f"no PaTAS attached){' — forced retrain' if cached else ''} ...")
     from test_cifar10_resnet import _recipe_lr, _recipe_kwargs
     hist = net.train(X_train, y_train, X_test, y_test, epochs=epochs,
-                     batch_size=128, lr_scheduler=_recipe_lr(epochs),
+                     batch_size=128, lr_scheduler=_recipe_lr(epochs, base),
                      **_recipe_kwargs(base))
     os.makedirs(nn_dir, exist_ok=True)
     net.save_model(model_path)
