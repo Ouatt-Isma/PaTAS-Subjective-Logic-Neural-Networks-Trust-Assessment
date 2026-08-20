@@ -621,6 +621,13 @@ def test_mnist_trust_trust_16():
 # Standalone CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+def _eps_type(s):
+    """argparse type for epsilon: a float, or "auto[<c>]" for the
+    scale-tied per-layer threshold eps = c * median(|delta|)."""
+    s = str(s)
+    return s if s.startswith("auto") else float(s)
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
@@ -645,7 +652,7 @@ def parse_args() -> argparse.Namespace:
                    help="Second hidden layer size — activates two-hidden-layer mode")
     p.add_argument("--epochs", type=int, default=_DEFAULT_EPOCHS,
                    help=f"Training epochs (default: {_DEFAULT_EPOCHS})")
-    p.add_argument("--epsilon-low", type=float, default=_DEFAULT_EPS,
+    p.add_argument("--epsilon-low", type=_eps_type, default=_DEFAULT_EPS,
                    help=f"PTAS epsilon (default: {_DEFAULT_EPS})")
     p.add_argument("--port", type=int, default=_BASE_PORT)
     p.add_argument("--no-round", type=int, default=None,

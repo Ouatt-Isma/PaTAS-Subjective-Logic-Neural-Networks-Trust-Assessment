@@ -78,19 +78,19 @@ def _arch_str(cfg: TestCaseConfig) -> str:
 def _datapath(cfg: TestCaseConfig) -> str:
     """Result directory that start_client() writes to — delegates to the
     canonical helper in patas_module/main.py so the naming can never drift."""
-    from main import nn_cache_dir
+    from main import nn_cache_dir, poison_patch_tag
     return nn_cache_dir(
         cfg.dataset, _arch_str(cfg), cfg.x_trust, cfg.y_trust,
-        patch=cfg.mnist_patch_size if cfg.mnist_poisoned_soph else None,
+        patch=poison_patch_tag(cfg),
         noise_level=cfg.noise_level)
 
 
 def _ptas_datapath(cfg: TestCaseConfig) -> str:
     """Result directory that start_ptas() writes to — canonical helper."""
-    from main import ptas_cache_dir
+    from main import ptas_cache_dir, poison_patch_tag
     return ptas_cache_dir(
         cfg.dataset, _arch_str(cfg), cfg.x_trust, cfg.y_trust, cfg.epsilon_low,
-        patch=cfg.mnist_patch_size if cfg.mnist_poisoned_soph else None,
+        patch=poison_patch_tag(cfg),
         fuse_method=getattr(cfg, "fuse_method", "average"),
         noise_level=cfg.noise_level)
 
@@ -189,6 +189,7 @@ def make_poisoned_cfg(
     hidden_dim: int = _HIDDEN_DIM,
     port:       int = _BASE_PORT,
     epochs:     int = _DEFAULT_EPOCHS,
+    poison_mode: str = "both",
 ) -> TestCaseConfig:
     return TestCaseConfig(
         dataset="mnist",
@@ -206,6 +207,7 @@ def make_poisoned_cfg(
         mnist_patch_size=patch_size,
         mnist_poisoned_soph=True,
         no_round=None,
+        poison_mode=poison_mode,
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -889,6 +891,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs",     type=int, default=_DEFAULT_EPOCHS)
     p.add_argument("--hidden-dim", type=int, default=_HIDDEN_DIM)
     p.add_argument("--port",       type=int, default=_BASE_PORT)
+    p.add_argument("--poison-mode", choices=["both", "flip", "patch"],
+                   default="both",
+                   help="Which poisoning channel to apply to the poisoned "
+                        "third (single --patch-size runs only): 'both' is "
+                        "the full backdoor (trigger patch + flipped label), "
+                        "'flip' flips labels without any patch, 'patch' "
+                        "adds the patch but keeps labels — the controls "
+                        "separating which corruption channel the trust "
+                        "signals respond to")
     p.add_argument("--ipta-patch", type=int, default=IPTA_PATCH_SIZE,
                    help=f"Patch size for IPTA table (default: {IPTA_PATCH_SIZE})")
     p.add_argument("--force-retrain", action="store_true", default=False,
@@ -908,6 +919,7 @@ def main() -> None:
             hidden_dim=args.hidden_dim,
             port=args.port,
             epochs=args.epochs,
+            poison_mode=args.poison_mode,
         )
         result = run_poisoned_scenario(cfg, force_retrain=args.force_retrain,
                                         not_ptas=args.not_ptas)

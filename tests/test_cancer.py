@@ -600,6 +600,13 @@ def test_cancer_baseline_no_ptas():
 # Standalone CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+def _eps_type(s):
+    """argparse type for epsilon: a float, or "auto[<c>]" for the
+    scale-tied per-layer threshold eps = c * median(|delta|)."""
+    s = str(s)
+    return s if s.startswith("auto") else float(s)
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
@@ -618,7 +625,7 @@ def parse_args() -> argparse.Namespace:
                    help="Y trust for single run: trust | distrust | vacuous")
     p.add_argument("--epochs", type=int, default=15)
     p.add_argument(
-        "--epsilon", "--epsilon-low", dest="epsilon", type=float, default=None,
+        "--epsilon", "--epsilon-low", dest="epsilon", type=_eps_type, default=None,
         help="Epsilon for single run (default: sweep [0.1, 0.01])",
     )
     p.add_argument("--port", type=int, default=_DEFAULT_PORT)

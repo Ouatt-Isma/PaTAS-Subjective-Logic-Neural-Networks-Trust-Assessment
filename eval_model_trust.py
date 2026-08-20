@@ -316,6 +316,13 @@ def write_table(rows: list[dict], correlations: dict, dataset: str,
 # Main
 # ---------------------------------------------------------------------------
 
+
+def _eps_type(s):
+    """argparse type for epsilon: a float, or "auto[<c>]" for the
+    scale-tied per-layer threshold eps = c * median(|delta|)."""
+    s = str(s)
+    return s if s.startswith("auto") else float(s)
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--dataset", choices=["mnist", "fashion", "gtsrb"], default="mnist")
@@ -325,7 +332,7 @@ def parse_args():
                    default=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
                    help="Train-time label-flip rates (default 0..0.5)")
     p.add_argument("--epochs", type=int, default=20)
-    p.add_argument("--eps", type=float, default=_DEFAULT_EPS)
+    p.add_argument("--eps", type=_eps_type, default=_DEFAULT_EPS)
     p.add_argument("--fuse-method",
                    choices=["average", "cumulative", "weighted", "compromise", "constraint"],
                    default="average")

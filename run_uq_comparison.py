@@ -495,7 +495,8 @@ def patas_ipta_scores(ptas, base_nn, X: np.ndarray, input_dim: int,
 
 def patas_conv_ipta_scores(ptas, base_nn, X: np.ndarray, input_dim: int,
                            itm: Optional[InputTrustModel] = None,
-                           score_mode: str = "serial") -> dict:
+                           score_mode: str = "serial",
+                           activity_norm: bool = False) -> dict:
     """Per-sample conv IPTA scoring (mirrors patas_ipta_scores).
 
     The activation path of a conv network is the per-layer channel
@@ -525,7 +526,12 @@ def patas_conv_ipta_scores(ptas, base_nn, X: np.ndarray, input_dim: int,
         try:
             with contextlib.redirect_stdout(silent):
                 probs, acts = base_nn.forward(X[i:i + 1], getactivated=True)
-                ipta = ptas.GenIPTA([a[0] for a in acts])
+                path = [np.asarray(a[0], dtype=np.float32) for a in acts]
+                if activity_norm:
+                    # remove the global activity level (mean 1 per layer):
+                    # only the relative channel-participation pattern remains
+                    path = [v / max(float(v.mean()), 1e-6) for v in path]
+                ipta = ptas.GenIPTA(path)
                 Ty_m = ipta(Tx_const)
                 Ty = (ipta(TensorArrayTO(input_ops[i:i + 1]))
                       if propagate_input else Ty_m)
@@ -717,6 +723,8 @@ def write_tex_table(conditions: list, dataset: str, out_path: str,
         "mahalanobis": "Mahalanobis~\\cite{lee2018mahalanobis}",
         "knn":         "kNN~\\cite{sun2022knnood}",
         "energy":      "Energy~\\cite{liu2020energy}",
+        "pix_mahalanobis": "Mahalanobis (pixel space)",
+        "pix_knn":     "kNN (pixel space)",
     }
     lines = [
         r"\begin{table}[ht]",
@@ -749,7 +757,7 @@ def write_tex_table(conditions: list, dataset: str, out_path: str,
     for tag, cond_label, metrics in conditions:
         lines += [r"\midrule",
                   rf"\multicolumn{{7}}{{l}}{{\textit{{{cond_label}}}}} \\"]
-        for method in ("patas", "conformity", "softmax", "mc_dropout", "edl", "mahalanobis", "knn", "energy"):
+        for method in ("patas", "conformity", "softmax", "mc_dropout", "edl", "mahalanobis", "knn", "energy", "pix_mahalanobis", "pix_knn"):
             if method not in metrics:
                 continue
             m = metrics[method]
@@ -796,6 +804,8 @@ def write_ood_tex_table(ood_metrics: dict, dataset: str, ood_label: str,
         "mahalanobis": "Mahalanobis~\\cite{lee2018mahalanobis}",
         "knn":         "kNN~\\cite{sun2022knnood}",
         "energy":      "Energy~\\cite{liu2020energy}",
+        "pix_mahalanobis": "Mahalanobis (pixel space)",
+        "pix_knn":     "kNN (pixel space)",
     }
     lines = [
         r"\begin{table}[ht]",
@@ -817,7 +827,7 @@ def write_ood_tex_table(ood_metrics: dict, dataset: str, ood_label: str,
         r"Mean score (ID) & Mean score (OOD) \\",
         r"\midrule",
     ]
-    for method in ("patas", "conformity", "softmax", "mc_dropout", "edl", "mahalanobis", "knn", "energy"):
+    for method in ("patas", "conformity", "softmax", "mc_dropout", "edl", "mahalanobis", "knn", "energy", "pix_mahalanobis", "pix_knn"):
         if method not in ood_metrics:
             continue
         m = ood_metrics[method]
@@ -869,7 +879,8 @@ def score_all_methods(Xn, ys, dataset, arch, cfgd, args, is_conv,
         if getattr(args, "conv_score", "ipta") == "ipta" and ptas is not None:
             t0 = time.time()
             sc = patas_conv_ipta_scores(ptas, base, Xn, cfgd["input_dim"],
-                                        itm=itm, score_mode=args.patas_score)
+                                        itm=itm, score_mode=args.patas_score,
+                                        activity_norm=args.conv_activity_norm)
             print(f"  PaTAS conv-IPTA scoring: {time.time()-t0:.1f}s "
                   f"({int(np.isnan(sc['score']).sum())} failures)  "
                   f"mean trust={np.nanmean(sc['trust']):.4f}  "
@@ -933,6 +944,24 @@ def score_all_methods(Xn, ys, dataset, arch, cfgd, args, is_conv,
             "conf": nan_conf, "correct": correct_base,
             "test_acc": float(correct_base.mean()),
         }
+
+    # ---- Pixel-space detector baselines (input-space counterparts of the
+    # feature-space detectors; work identically for MLP and conv models) ----
+    if aux is not None and ("pix_maha" in aux or "pix_knn" in aux):
+        Xf = np.asarray(Xn).reshape(len(Xn), -1)
+        nan_conf_pix = np.full(len(Xn), np.nan)
+        if aux.get("pix_maha") is not None:
+            results["pix_mahalanobis"] = {
+                "score": aux["pix_maha"].score(Xf),
+                "conf": nan_conf_pix, "correct": correct_base,
+                "test_acc": float(correct_base.mean()),
+            }
+        if aux.get("pix_knn") is not None:
+            results["pix_knn"] = {
+                "score": aux["pix_knn"].score(Xf),
+                "conf": nan_conf_pix, "correct": correct_base,
+                "test_acc": float(correct_base.mean()),
+            }
 
     # ---- MC Dropout ----------------------------------------------------------
     mc = mc_dropout_predict(mc_model, Xn, T=args.mc_passes, seed=args.seed)
@@ -1099,6 +1128,13 @@ def run_condition(dataset: str, cond: TrainCondition, args,
                                        seed=args.seed),
                "knn_bank": fit_knn_bank(feats_tr, seed=args.seed)}
         del feats_tr
+    if not args.no_pixel_baselines:
+        from uq_methods import PixelMahalanobis, PixelKNN
+        Xtr_flat = np.asarray(X_train).reshape(len(X_train), -1)
+        aux = aux if aux is not None else {}
+        aux["pix_maha"] = PixelMahalanobis().fit(Xtr_flat)
+        aux["pix_knn"] = PixelKNN().fit(Xtr_flat, seed=args.seed)
+        del Xtr_flat
 
     def _factory_dropout():
         if is_conv:
@@ -1166,6 +1202,26 @@ def run_condition(dataset: str, cond: TrainCondition, args,
         test_conditions.append(
             ("mixed", f"Mixed batch (clean + $p={nl_max:g}$, 1:1)", None,
              Xmix, np.concatenate([ys, ys])))
+    if with_mixed and args.hard_corruptions:
+        # Marginal-preserving and adversarially blended corruptions: paired
+        # mixed batches probing the conformity model's known blind spots
+        # (per-pixel marginals unchanged / low-amplitude in-range trigger).
+        from uq_methods import apply_translation, apply_blended_trigger
+        in_ch = int(cfgd.get("in_channels", 1))
+        img = int(cfgd.get("img_size") or
+                  round((np.prod(Xs.shape[1:]) / in_ch) ** 0.5))
+        Xsh = apply_translation(Xs.reshape(len(Xs), -1), img, shift=2,
+                                in_channels=in_ch,
+                                seed=args.seed + 2).reshape(Xs.shape)
+        test_conditions.append(
+            ("mixshift", r"Mixed batch (clean + shift $\leq 2$\,px, 1:1)", None,
+             np.concatenate([Xs, Xsh]), np.concatenate([ys, ys])))
+        Xbl = apply_blended_trigger(Xs.reshape(len(Xs), -1), img,
+                                    in_channels=in_ch,
+                                    alpha=0.25, patch=6).reshape(Xs.shape)
+        test_conditions.append(
+            ("mixblend", r"Mixed batch (clean + blended trigger, 1:1)", None,
+             np.concatenate([Xs, Xbl]), np.concatenate([ys, ys])))
 
     # ---- Evaluate on every test condition -------------------------------------
     title = {"mnist": "MNIST", "fashion": "Fashion-MNIST",
@@ -1188,7 +1244,7 @@ def run_condition(dataset: str, cond: TrainCondition, args,
         if tag == "clean":
             results_clean = results
         metrics = compute_metrics(results, calibrators)
-        if tag == "mixed":
+        if tag.startswith("mix"):
             # Corruption detection: on the pooled batch, how well does each
             # method's own score separate clean from corrupted inputs?  On a
             # corruption-robust model this is a *different* question from
@@ -1222,7 +1278,7 @@ def run_condition(dataset: str, cond: TrainCondition, args,
         for method, m in metrics.items():
             print(f"  {method:<14} {m['test_acc']*100:7.2f}% {m['auroc']:8.3f} "
                   f"{m['aurc']:8.3f} {m['ece']:8.3f} {m.get('ece_calib', float('nan')):8.3f}")
-        if tag == "mixed":
+        if tag.startswith("mix"):
             print("  corruption-detection AUROC (clean vs corrupted): "
                   + "  ".join(f"{meth} {m['corruption_det_auroc']:.3f}"
                               for meth, m in metrics.items()))
@@ -1375,7 +1431,9 @@ def run_condition(dataset: str, cond: TrainCondition, args,
 # Multi-seed aggregation (mean ± std over evaluation replicates)
 # ---------------------------------------------------------------------------
 
-_TAG_LABELS = {"clean": "Clean test data", "mixed": "Mixed batch (1:1)"}
+_TAG_LABELS = {"clean": "Clean test data", "mixed": "Mixed batch (1:1)",
+               "mixshift": r"Mixed batch (shift $\leq 2$\,px, 1:1)",
+               "mixblend": "Mixed batch (blended trigger, 1:1)"}
 
 
 def _tag_label(tag: str) -> str:
@@ -1419,6 +1477,8 @@ def aggregate_seed_outputs(dataset: str, cond: TrainCondition, seeds: list,
         "mahalanobis": "Mahalanobis~\\cite{lee2018mahalanobis}",
         "knn":         "kNN~\\cite{sun2022knnood}",
         "energy":      "Energy~\\cite{liu2020energy}",
+        "pix_mahalanobis": "Mahalanobis (pixel space)",
+        "pix_knn":     "kNN (pixel space)",
     }
     metric_cols = [("test_acc", 100.0, "{:.2f}"), ("auroc", 1.0, "{:.3f}"),
                    ("aurc", 1.0, "{:.3f}"), ("ece", 1.0, "{:.3f}"),
@@ -1497,7 +1557,7 @@ def aggregate_seed_outputs(dataset: str, cond: TrainCondition, seeds: list,
             r"Method & AUROC $\uparrow$ & FPR@95\%TPR $\downarrow$ & "
             r"Mean score (ID) & Mean score (OOD) \\", r"\midrule",
         ]
-        for method in ("patas", "conformity", "softmax", "mc_dropout", "edl", "mahalanobis", "knn", "energy"):
+        for method in ("patas", "conformity", "softmax", "mc_dropout", "edl", "mahalanobis", "knn", "energy", "pix_mahalanobis", "pix_knn"):
             if method not in ood_agg:
                 continue
             m = ood_agg[method]
@@ -1546,6 +1606,13 @@ def run(dataset: str, args) -> dict:
     return out
 
 
+
+def _eps_type(s):
+    """argparse type for epsilon: a float, or "auto[<c>]" for the
+    scale-tied per-layer threshold eps = c * median(|delta|)."""
+    s = str(s)
+    return s if s.startswith("auto") else float(s)
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--dataset", choices=list(DATASET_CFG) + ["all"], default="mnist")
@@ -1554,7 +1621,7 @@ def parse_args():
                         "(ignored for cifar10)")
     p.add_argument("--epochs", type=int, default=20,
                    help="Training epochs for models that need training (default 20)")
-    p.add_argument("--eps", type=float, default=_DEFAULT_EPS,
+    p.add_argument("--eps", type=_eps_type, default=_DEFAULT_EPS,
                    help=f"PaTAS epsilon of the cached omegas (default {_DEFAULT_EPS})")
     p.add_argument("--fuse-method",
                    choices=["average", "cumulative", "weighted", "compromise", "constraint"],
@@ -1604,6 +1671,22 @@ def parse_args():
                         "statistics; 'constant' reproduces the historical "
                         "fully-trusted input (ablation: the PaTAS score then "
                         "carries no per-sample input information)")
+    p.add_argument("--no-pixel-baselines", action="store_true",
+                   help="Skip the raw-pixel Mahalanobis / kNN detector "
+                        "baselines (input-space counterparts of the "
+                        "feature-space detectors)")
+    p.add_argument("--hard-corruptions", action="store_true",
+                   help="Add two extra paired mixed batches: random "
+                        "translation (marginal-preserving corruption) and a "
+                        "low-amplitude blended center trigger (adaptive "
+                        "adversary) — stress tests for the marginal "
+                        "conformity model")
+    p.add_argument("--conv-activity-norm", action="store_true",
+                   help="Normalize each layer's channel-activity vector to "
+                        "mean 1 before the conv IPTA (removes the global "
+                        "activity-level component of the path signal; "
+                        "diagnostic for the Fashion-CNN reverse-OOD "
+                        "inversion)")
     p.add_argument("--conv-score", choices=["ipta", "classlevel"],
                    default="ipta",
                    help="Conv (CIFAR-10) PaTAS scoring: 'ipta' (default) "
