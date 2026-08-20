@@ -83,6 +83,8 @@ METHOD_STYLE: Dict[str, dict] = {
     "mahalanobis": {"color": "#E69F00", "ls": "-.", "label": "Mahalanobis (feature space)"},
     "knn":         {"color": "#F0E442", "ls": ":",  "label": "kNN (feature space)"},
     "energy":      {"color": "#000000", "ls": "--", "label": "Energy score"},
+    "pix_mahalanobis": {"color": "#8B4513", "ls": "-.", "label": "Mahalanobis (pixel space)"},
+    "pix_knn":     {"color": "#7F7F00", "ls": ":",  "label": "kNN (pixel space)"},
     "deeptrust":   {"color": "#CC79A7", "ls": "-",  "label": "DeepTrust (Cheng et al.)"},
 }
 
@@ -549,6 +551,70 @@ def roc_correctness(scores: np.ndarray, correct: np.ndarray):
     ok = np.isfinite(scores)
     fpr, tpr, _ = roc_curve(np.asarray(correct, dtype=int)[ok], scores[ok])
     return fpr, tpr, float(auc(fpr, tpr))
+
+
+class PixelMahalanobis:
+    """Raw-pixel Mahalanobis detector (shrinkage covariance): the
+    input-space counterpart of the feature-space Mahalanobis baseline.
+    score = negative squared Mahalanobis distance to the training mean."""
+
+    def fit(self, X: np.ndarray, shrink: float = 0.1):
+        X = np.asarray(X, dtype=np.float64)
+        self.mu = X.mean(axis=0)
+        cov = np.cov(X - self.mu, rowvar=False)
+        lam = shrink * np.trace(cov) / cov.shape[0]
+        self.prec = np.linalg.inv(cov + lam * np.eye(cov.shape[0]))
+        return self
+
+    def score(self, X: np.ndarray) -> np.ndarray:
+        d = np.asarray(X, dtype=np.float64) - self.mu
+        return -np.einsum("ni,ij,nj->n", d, self.prec, d).astype(np.float32)
+
+
+class PixelKNN:
+    """Raw-pixel deep-kNN counterpart: negative distance to the k-th
+    nearest training image in pixel space."""
+
+    def fit(self, X: np.ndarray, k: int = 10, subsample: int = 10000, seed: int = 0):
+        from sklearn.neighbors import NearestNeighbors
+        rng = np.random.default_rng(seed)
+        X = np.asarray(X, dtype=np.float32)
+        if len(X) > subsample:
+            X = X[rng.choice(len(X), size=subsample, replace=False)]
+        self.k = k
+        self.nn = NearestNeighbors(n_neighbors=k).fit(X)
+        return self
+
+    def score(self, X: np.ndarray) -> np.ndarray:
+        dist, _ = self.nn.kneighbors(np.asarray(X, dtype=np.float32))
+        return (-dist[:, -1]).astype(np.float32)
+
+
+def apply_translation(X: np.ndarray, img_size: int, shift: int = 2,
+                      in_channels: int = 1, seed: int = 0) -> np.ndarray:
+    """Marginal-preserving corruption: per-sample random circular shift of
+    up to ``shift`` pixels in each direction."""
+    rng = np.random.default_rng(seed)
+    Xs = np.asarray(X, dtype=np.float32).reshape(-1, in_channels, img_size, img_size)
+    out = np.empty_like(Xs)
+    dx = rng.integers(-shift, shift + 1, size=len(Xs))
+    dy = rng.integers(-shift, shift + 1, size=len(Xs))
+    for i in range(len(Xs)):
+        out[i] = np.roll(np.roll(Xs[i], dy[i], axis=1), dx[i], axis=2)
+    return out.reshape(X.shape)
+
+
+def apply_blended_trigger(X: np.ndarray, img_size: int, in_channels: int = 1,
+                          alpha: float = 0.25, patch: int = 6) -> np.ndarray:
+    """Adaptive-adversary trigger: a LOW-amplitude patch alpha-blended into
+    the image CENTER (the high-variance region), designed to evade
+    marginal-conformity detection."""
+    Xs = np.asarray(X, dtype=np.float32).reshape(-1, in_channels, img_size, img_size).copy()
+    hi = float(np.percentile(X, 99.5))
+    c0 = (img_size - patch) // 2
+    Xs[:, :, c0:c0 + patch, c0:c0 + patch] = (
+        (1.0 - alpha) * Xs[:, :, c0:c0 + patch, c0:c0 + patch] + alpha * hi)
+    return Xs.reshape(X.shape)
 
 
 def fpr_at_tpr(scores: np.ndarray, labels: np.ndarray,
