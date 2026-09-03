@@ -122,7 +122,18 @@ def eval_rate(dataset: str, rate: float, args, informed: bool = False) -> dict:
     the calculus)."""
     from NN.datasets import load_data
 
-    if rate == 0:
+    y_opinion = getattr(args, "y_opinion", "default")
+    if y_opinion == "trust" and rate > 0:
+        # control: labels ARE corrupted but the auditor still asserts full
+        # label trust -> only the gradient evidence can register corruption
+        cond = TrainCondition(f"labelnoise{rate:g}ytrust", "trust", "trust", rate,
+                              f"Label noise (trusted label opinion, $p={rate:g}$)")
+    elif y_opinion == "vacuous" and rate == 0:
+        # control: labels are clean but the auditor asserts no knowledge ->
+        # measures the ceiling the vacuous label opinion alone imposes
+        cond = TrainCondition("cleanyvac", "trust", "vacuous", None,
+                              "Clean labels (vacuous label opinion)")
+    elif rate == 0:
         cond = CLEAN_CONDITION
     elif informed:
         cond = TrainCondition(f"labelnoise{rate:g}inf", "trust",
@@ -176,7 +187,7 @@ def eval_rate(dataset: str, rate: float, args, informed: bool = False) -> dict:
                           args.train_missing, fuse_method=args.fuse_method,
                           x_trust=cond.x_trust, y_trust=cond.y_trust,
                           noise_level=cond.noise_level,
-                          y_dataset=y_how if rate > 0 else None,
+                          y_dataset=y_how,   # data follows the rate, never the opinion
                           force_retrain=args.force_retrain_all):
         ptas = load_offline_ptas(dataset, arch, args.eps,
                                  fuse_method=args.fuse_method,
@@ -342,6 +353,13 @@ def parse_args():
                    help="Samples for the per-sample IPTA path-trust mean "
                         "(default 500)")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--y-opinion", choices=["default", "trust", "vacuous"],
+                   default="default",
+                   help="Label opinion held FIXED across all rates (control "
+                        "for the audit): 'trust' asserts (1,0,0) even on "
+                        "corrupted labels, 'vacuous' asserts (0,0,1) even on "
+                        "clean labels; 'default' is the paper setting "
+                        "(trusted at p=0, vacuous at p>0)")
     p.add_argument("--rate-informed", action="store_true",
                    help="Additionally run the audit with rate-informed "
                         "label opinions (1-p, 0, p) instead of vacuous "
@@ -372,7 +390,9 @@ def main():
     arch = DATASET_CFG[dataset]["arch"]
 
     fuse_suffix = "" if args.fuse_method == "average" else f"_fuse_{args.fuse_method}"
-    out_dir = f"results/ModelTrust_{dataset}_{_arch_str(arch)}{fuse_suffix}"
+    yop_suffix = "" if args.y_opinion == "default" else f"_yop_{args.y_opinion}"
+    eps_suffix = "" if args.eps == _DEFAULT_EPS else f"_eps_{args.eps}"
+    out_dir = f"results/ModelTrust_{dataset}_{_arch_str(arch)}{fuse_suffix}{yop_suffix}{eps_suffix}"
     os.makedirs(out_dir, exist_ok=True)
 
     rows = [eval_rate(dataset, float(r), args) for r in sorted(set(args.rates))]
