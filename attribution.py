@@ -149,15 +149,12 @@ class OracleSource(TrustSource):
 # The attribution replay
 # ---------------------------------------------------------------------------
 
-def attribute(Ws, bs, X, Y, source: TrustSource, evidence: float = 50.0,
-              W_prior: float = 2.0, batch: int = 512, verbose: bool = True):
-    """Replay the training set through the converged model and build one
-    opinion per parameter from the samples that formed it.
-
-    Returns (omegas, mass) with omegas a list of (in+1, out, 3) arrays in the
-    same layout as the PTAS omega_arrays.pkl, and mass the per-layer
-    influence matrices (used for reporting which parameters are live)."""
-    from subjective_logic import bpq_vec
+def accumulate(Ws, bs, X, Y, source: TrustSource, batch: int = 512,
+               verbose: bool = True):
+    """Replay the training set and accumulate, per parameter, the influence
+    mass and the belief/disbelief-weighted mass of the samples that produced
+    it.  Separated from ``attribute`` so that baselines which do not use the
+    opinion algebra (a plain influence ratio) can share the same replay."""
     L = len(Ws)
     mass = [np.zeros((W.shape[0] + 1, W.shape[1]), np.float64) for W in Ws]
     R = [np.zeros_like(m) for m in mass]
@@ -166,7 +163,6 @@ def attribute(Ws, bs, X, Y, source: TrustSource, evidence: float = 50.0,
     for s0 in range(0, n, batch):
         idx = np.arange(s0, min(s0 + batch, n))
         xb, yb = X[idx], Y[idx]
-        # forward, keeping activations and pre-activations
         acts, zs = [xb], []
         a = xb
         for l in range(L):
@@ -177,26 +173,39 @@ def attribute(Ws, bs, X, Y, source: TrustSource, evidence: float = 50.0,
             else:
                 a = np.maximum(z, 0.0)
             acts.append(a)
-        # backward, accumulating attribution
         dz = (acts[-1] - yb) / len(idx)
         b_s, d_s = source.samples(idx, xb)
         for l in range(L - 1, -1, -1):
             a_prev = np.abs(acts[l]); adz = np.abs(dz)
             if l == 0:
                 b_f, d_f = source.features(idx, xb)
-            else:                      # hidden activations inherit the sample's provenance
+            else:
                 b_f = np.repeat(b_s[:, None], a_prev.shape[1], 1)
                 d_f = np.repeat(d_s[:, None], a_prev.shape[1], 1)
             mass[l][:-1] += a_prev.T @ adz
             R[l][:-1] += (a_prev * b_f).T @ adz
             S[l][:-1] += (a_prev * d_f).T @ adz
-            mass[l][-1] += adz.sum(0)                    # bias row: input is 1
+            mass[l][-1] += adz.sum(0)
             R[l][-1] += (b_s[:, None] * adz).sum(0)
             S[l][-1] += (d_s[:, None] * adz).sum(0)
             if l > 0:
                 dz = (dz @ Ws[l].T) * (zs[l - 1] > 0)
         if verbose and (s0 // batch) % 20 == 0:
             print(f"    replay {min(s0 + batch, n):>6}/{n}", flush=True)
+    return mass, R, S
+
+
+def attribute(Ws, bs, X, Y, source: TrustSource, evidence: float = 50.0,
+              W_prior: float = 2.0, batch: int = 512, verbose: bool = True):
+    """Replay the training set through the converged model and build one
+    opinion per parameter from the samples that formed it.
+
+    Returns (omegas, mass) with omegas a list of (in+1, out, 3) arrays in the
+    same layout as the PTAS omega_arrays.pkl, and mass the per-layer
+    influence matrices (used for reporting which parameters are live)."""
+    from subjective_logic import bpq_vec
+    L = len(Ws)
+    mass, R, S = accumulate(Ws, bs, X, Y, source, batch=batch, verbose=verbose)
     omegas = []
     for l in range(L):
         m = mass[l]
