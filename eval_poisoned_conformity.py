@@ -69,7 +69,7 @@ def load_poisoned_artifacts(patch_size: int, hidden: int, eps: float):
 
 
 def ipta_class_opinions(ptas, nn, X: np.ndarray, cls: int, itm=None,
-                        oracle_patch: int | None = None) -> np.ndarray:
+                        oracle_patch: int | None = None, path_mode: str = "binary") -> np.ndarray:
     """Per-sample IPTA opinion of the class-``cls`` output neuron under the
     selected input-opinion mode. Returns (n, 3)."""
     from concrete.TensorTO import TensorArrayTO, fill as tfill
@@ -81,7 +81,13 @@ def ipta_class_opinions(ptas, nn, X: np.ndarray, cls: int, itm=None,
     for i in range(len(X)):
         with contextlib.redirect_stdout(silent):
             _, path = nn.forward(X[i:i + 1], getactivated=True)
-            ipta = ptas.GenIPTA(path)
+            if path_mode == "activity":
+                mags = [np.abs(np.asarray(
+                    a.detach().cpu().numpy() if hasattr(a, "detach") else a
+                ).reshape(-1)) for a in nn._activations[:-1]]
+                ipta = ptas.GenIPTA(path, magnitudes=mags)
+            else:
+                ipta = ptas.GenIPTA(path)
             if itm is not None:
                 Tx = TensorArrayTO(ops[i:i + 1])
             else:
@@ -100,7 +106,15 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--patch-size", type=int, default=4)
     ap.add_argument("--hidden", type=int, default=128)
-    ap.add_argument("--eps", type=float, default=0.05)
+    ap.add_argument("--eps", type=lambda v: v if str(v).startswith(("auto","attr")) else float(v),
+                    default=0.05,
+                    help="Threshold slot of the PTAS cache to read: a float, "
+                         "'auto<c>' for the scale-tied rule, or 'attr-<source>' "
+                         "for attribution-weighted parameter trust")
+    ap.add_argument("--path-mode", choices=["binary", "activity"], default="binary",
+                    help="'activity' weights each input by its magnitude in "
+                         "this inference (dense counterpart of the conv "
+                         "activity weighting)")
     ap.add_argument("--subset", type=int, default=400,
                     help="Samples per class subset (default 400)")
     ap.add_argument("--seed", type=int, default=0)
@@ -149,7 +163,7 @@ def main():
                "input_trust": float(itm.sample_trust(X).mean())}
         for mode, kw in (("trusted", {}), ("conformity", {"itm": itm}),
                          ("oracle", {"oracle_patch": args.patch_size})):
-            ops = ipta_class_opinions(ptas, nn, X, cls, **kw)
+            ops = ipta_class_opinions(ptas, nn, X, cls, path_mode=args.path_mode, **kw)
             pp = ops[:, 0] + 0.5 * ops[:, 2]
             row[mode] = {"b": round(float(ops[:, 0].mean()), 4),
                          "d": round(float(ops[:, 1].mean()), 4),

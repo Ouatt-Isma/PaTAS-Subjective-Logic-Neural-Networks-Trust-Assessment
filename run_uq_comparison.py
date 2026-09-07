@@ -408,7 +408,8 @@ def load_offline_conv_ptas(eps: float, x_trust: str = "trust",
 
 def patas_ipta_scores(ptas, base_nn, X: np.ndarray, input_dim: int,
                       itm: Optional[InputTrustModel] = None,
-                      score_mode: str = "serial") -> dict:
+                      score_mode: str = "serial",
+                      path_mode: str = "binary") -> dict:
     """Per-sample PaTAS filter: belief-anchored trust-discounted confidence.
 
     Two trust sources are combined per sample:
@@ -450,6 +451,8 @@ def patas_ipta_scores(ptas, base_nn, X: np.ndarray, input_dim: int,
 
     if score_mode not in ("serial", "propagated"):
         raise ValueError(f"unknown score_mode: {score_mode!r}")
+    if path_mode not in ("binary", "activity"):
+        raise ValueError(f"unknown path_mode: {path_mode!r}")
     n_classes = int(ptas.structure[-1])
     Tx_const = TensorArrayTO(tfill((1, input_dim), method="trust"))
     propagate_input = itm is not None and score_mode == "propagated"
@@ -465,7 +468,17 @@ def patas_ipta_scores(ptas, base_nn, X: np.ndarray, input_dim: int,
         try:
             with contextlib.redirect_stdout(silent):
                 probs, path = base_nn.forward(X[i:i + 1], getactivated=True)
-                ipta = ptas.GenIPTA(path)
+                if path_mode == "activity":
+                    # magnitude-weighted path: every input contributes in
+                    # proportion to how much it drove this inference, so a
+                    # weight the network did not use cannot lend its trust
+                    # (binary activations reduce to the pruned semantics)
+                    mags = [np.abs(np.asarray(
+                        a.detach().cpu().numpy() if hasattr(a, "detach") else a
+                    ).reshape(-1)) for a in base_nn._activations[:-1]]
+                    ipta = ptas.GenIPTA(path, magnitudes=mags)
+                else:
+                    ipta = ptas.GenIPTA(path)
                 Ty_m = ipta(Tx_const)
                 Ty = (ipta(TensorArrayTO(input_ops[i:i + 1]))
                       if propagate_input else Ty_m)          # (1, K, 3)
@@ -895,7 +908,8 @@ def score_all_methods(Xn, ys, dataset, arch, cfgd, args, is_conv,
     elif ptas is not None:
         t0 = time.time()
         sc = patas_ipta_scores(ptas, base, Xn, cfgd["input_dim"], itm=itm,
-                               score_mode=args.patas_score)
+                               score_mode=args.patas_score,
+                               path_mode=args.patas_path)
         print(f"  PaTAS IPTA scoring: {time.time()-t0:.1f}s "
               f"({int(np.isnan(sc['score']).sum())} failures)  "
               f"mean trust={np.nanmean(sc['trust']):.4f}  "
@@ -1687,6 +1701,12 @@ def parse_args():
                         "activity-level component of the path signal; "
                         "diagnostic for the Fashion-CNN reverse-OOD "
                         "inversion)")
+    p.add_argument("--patas-path", choices=["binary", "activity"], default="binary",
+                   help="Dense IPTA path conditioning: 'binary' (default) "
+                        "prunes rows by the activation flag; 'activity' "
+                        "weights every row by its activation magnitude, the "
+                        "dense counterpart of the conv activity weighting "
+                        "(answers the magnitude-blindness concern)")
     p.add_argument("--conv-score", choices=["ipta", "classlevel"],
                    default="ipta",
                    help="Conv (CIFAR-10) PaTAS scoring: 'ipta' (default) "
