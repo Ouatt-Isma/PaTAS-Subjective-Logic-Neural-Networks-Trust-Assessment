@@ -190,6 +190,8 @@ def make_poisoned_cfg(
     port:       int = _BASE_PORT,
     epochs:     int = _DEFAULT_EPOCHS,
     poison_mode: str = "both",
+    oracle_trust: bool = True,
+    epsilon_low = 0.05,
 ) -> TestCaseConfig:
     return TestCaseConfig(
         dataset="mnist",
@@ -200,7 +202,7 @@ def make_poisoned_cfg(
         epochs=epochs,
         batch_size=128,
         learning_rate=get_lr_mnist,
-        epsilon_low=0.05,
+        epsilon_low=epsilon_low,
         x_trust="trust",
         y_trust="trust",
         port=port,
@@ -208,6 +210,7 @@ def make_poisoned_cfg(
         mnist_poisoned_soph=True,
         no_round=None,
         poison_mode=poison_mode,
+        poison_oracle_trust=oracle_trust,
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -878,6 +881,13 @@ def test_poisoned_patch27():
 # Standalone CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+def _eps_type(v):
+    """argparse type for epsilon: a float, or "auto[<c>]" for the scale-tied
+    per-layer threshold eps = c * median(|delta|)."""
+    v = str(v)
+    return v if v.startswith("auto") else float(v)
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
@@ -891,6 +901,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs",     type=int, default=_DEFAULT_EPOCHS)
     p.add_argument("--hidden-dim", type=int, default=_HIDDEN_DIM)
     p.add_argument("--port",       type=int, default=_BASE_PORT)
+    p.add_argument("--no-oracle-trust", action="store_true",
+                   help="Keep the data poisoning but drop the oracle-aware "
+                        "trust generator: input and label opinions are the "
+                        "plain trust/trust specs, so any per-class trust gap "
+                        "must come from gradient evidence alone (control)")
+    p.add_argument("--epsilon-low", type=_eps_type, default=0.05,
+                   help="Gradient-evidence threshold; accepts 'auto<c>' for "
+                        "the scale-tied per-layer rule")
     p.add_argument("--poison-mode", choices=["both", "flip", "patch"],
                    default="both",
                    help="Which poisoning channel to apply to the poisoned "
@@ -920,6 +938,8 @@ def main() -> None:
             port=args.port,
             epochs=args.epochs,
             poison_mode=args.poison_mode,
+            oracle_trust=not args.no_oracle_trust,
+            epsilon_low=args.epsilon_low,
         )
         result = run_poisoned_scenario(cfg, force_retrain=args.force_retrain,
                                         not_ptas=args.not_ptas)
