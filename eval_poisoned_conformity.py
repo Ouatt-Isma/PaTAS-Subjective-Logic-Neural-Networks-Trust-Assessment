@@ -193,6 +193,10 @@ def main():
         print(f"  {k:24s} {v:.4f}")
 
     out_dir = "results/PoisonedConformity_mnist"
+    if str(args.eps) != "0.05":
+        out_dir += f"_eps{args.eps}"
+    if args.path_mode != "binary":
+        out_dir += f"_{args.path_mode}"
     if args.fit_on != "clean" or args.stats != "moment":
         out_dir += f"_{args.fit_on}_{args.stats}"
     os.makedirs(out_dir, exist_ok=True)
