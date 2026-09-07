@@ -1,0 +1,4 @@
+module load compiler/gnu/14.2
+module load devel/python/3.11.7-gnu-14.2
+module load devel/cuda/12.8
+source ~/myenv/bin/activate
