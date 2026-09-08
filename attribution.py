@@ -103,6 +103,35 @@ class ProvenanceSource(TrustSource):
                 np.repeat(d[:, None], xb.shape[1], 1))
 
 
+class MultiSourceProvenance(TrustSource):
+    """Several data sources carrying DIFFERENT AMOUNTS of evidence.
+
+    The single-source case cannot separate the opinion algebra from a plain
+    influence ratio: with one untrusted source, belief and disbelief are both
+    functions of the untrusted share of a parameter's influence, so the mapped
+    opinion is a monotone function of that share and the two rankings must
+    coincide.  They can only diverge when sources differ in how much evidence
+    they carry, e.g. a verified source (1,0,0), a source of unknown provenance
+    (0,0,1) and a source known to be compromised (0,1,0).  A scalar ratio sees
+    "not verified" and cannot tell the last two apart; an opinion keeps
+    vacuity and disbelief on separate axes.
+    """
+    name = "multisource"
+
+    def __init__(self, assignment, opinions):
+        self.assign = np.asarray(assignment, dtype=int)
+        self.ops = np.asarray(opinions, dtype=np.float32)   # (n_sources, 3)
+
+    def samples(self, idx, xb):
+        o = self.ops[self.assign[idx]]
+        return o[:, 0].astype(np.float32), o[:, 1].astype(np.float32)
+
+    def features(self, idx, xb):
+        b, d = self.samples(idx, xb)
+        return (np.repeat(b[:, None], xb.shape[1], 1),
+                np.repeat(d[:, None], xb.shape[1], 1))
+
+
 class ConformitySource(TrustSource):
     """Estimation from data: per-feature conformity opinions from the
     framework's own InputTrustModel, un-pooled."""
