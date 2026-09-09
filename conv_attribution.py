@@ -186,6 +186,11 @@ def main():
                          "ResNet to a competitive accuracy")
     ap.add_argument("--lr", type=float, default=0.05)
     ap.add_argument("--batch", type=int, default=128)
+    ap.add_argument("--live-pct", type=float, default=20.0,
+                    help="Positions below this percentile of input influence "
+                         "are treated as inactive and never scored. A trigger "
+                         "position that falls below it cannot be recovered, so "
+                         "this is the coverage knob.")
     ap.add_argument("--device", default=None, help="cuda / cpu (auto by default)")
     args = ap.parse_args()
 
@@ -269,7 +274,7 @@ def main():
         infl, mass, R, S = input_attribution(model, X, Y, b_n, d_n, mu, dev)
         # the live filter must use true influence: a trigger position carries
         # little centred mass while being highly influential
-        live = infl > np.percentile(infl, 20)
+        live = infl > np.percentile(infl, args.live_pct)
         r = np.divide(args.evidence * R, mass, out=np.zeros_like(mass), where=mass > 1e-12)
         s = np.divide(args.evidence * S, mass, out=np.zeros_like(mass), where=mass > 1e-12)
         om = bpq_vec(r, s, W=2.0)
@@ -296,7 +301,8 @@ def main():
                          trigger_found=int(np.isin(pidx, sel).sum()),
                          masked_clean=am, masked_asr=zm,
                          share_trigger=float(share[pidx].mean()),
-                         share_live=float(share[live].mean())))
+                         share_live=float(share[live].mean()),
+                         trigger_live=int(live[pidx].sum())))
     from statistics import mean, pstdev
     f = lambda k: (mean([r[k] for r in rows]),
                    pstdev([r[k] for r in rows]) if len(rows) > 1 else 0.0)
@@ -307,14 +313,16 @@ def main():
         a, ad = f(ka); z, zd = f(kz)
         print(f"  {lbl:<22}{a*100:>10.2f}±{ad*100:<5.2f}{z*100:>12.2f}±{zd*100:<5.2f}")
     a, _ = f("share_trigger"); b, _ = f("share_live")
-    t, _ = f("trigger_found")
+    t, _ = f("trigger_found"); tl, _ = f("trigger_live")
     print(f"  untrusted share: trigger {a:.3f} vs live {b:.3f}   "
-          f"trigger positions found {t:.1f}/{len(pidx)}")
+          f"trigger positions found {t:.1f}/{len(pidx)} "
+          f"(live {tl:.1f}/{len(pidx)})")
     # The architecture and the augmentation flag are part of the key: the
     # augmentation boundary is exactly the comparison this script makes, so
     # the two arms must never write into the same directory.
     out = (f"results/ConvAttr_{args.dataset}_p{args.poisoned_patch}"
-           f"_{args.arch}" + ("_aug" if args.augment else ""))
+           f"_{args.arch}" + ("_aug" if args.augment else "")
+           + ("" if args.live_pct == 20.0 else f"_lp{args.live_pct:g}"))
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "summary.json"), "w", encoding="utf-8") as fh:
         json.dump(dict(dataset=args.dataset, patch=args.poisoned_patch,
