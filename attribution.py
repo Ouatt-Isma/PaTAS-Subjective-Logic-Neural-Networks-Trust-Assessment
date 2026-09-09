@@ -179,13 +179,28 @@ class OracleSource(TrustSource):
 # ---------------------------------------------------------------------------
 
 def accumulate(Ws, bs, X, Y, source: TrustSource, batch: int = 512,
-               verbose: bool = True):
+               verbose: bool = True, center=None):
     """Replay the training set and accumulate, per parameter, the influence
     mass and the belief/disbelief-weighted mass of the samples that produced
     it.  Separated from ``attribute`` so that baselines which do not use the
-    opinion algebra (a plain influence ratio) can share the same replay."""
+    opinion algebra (a plain influence ratio) can share the same replay.
+
+    ``center`` is the per-feature mean of the trusted data.  When given, the
+    input layer's attribution weight becomes each sample's DEVIATION from
+    that mean rather than its magnitude.  This matters because standardised
+    features give a constant-valued input a large magnitude: a pixel that is
+    blank in every clean image still carries |x| = |mu - mean| / sd, so clean
+    data appears to drive a parameter the poison alone actually moves.
+    Centring removes that offset and is what lets the method transfer between
+    datasets whose standardisation constants differ.
+
+    Returns (mass_influence, mass_attr, R, S).  The two masses differ only
+    when centring: the LIVE filter must use true influence, since a trigger
+    parameter has little centred mass while being highly influential.
+    """
     L = len(Ws)
     mass = [np.zeros((W.shape[0] + 1, W.shape[1]), np.float64) for W in Ws]
+    infl = [np.zeros_like(m) for m in mass]
     R = [np.zeros_like(m) for m in mass]
     S = [np.zeros_like(m) for m in mass]
     n = len(X)
@@ -205,15 +220,19 @@ def accumulate(Ws, bs, X, Y, source: TrustSource, batch: int = 512,
         dz = (acts[-1] - yb) / len(idx)
         b_s, d_s = source.samples(idx, xb)
         for l in range(L - 1, -1, -1):
-            a_prev = np.abs(acts[l]); adz = np.abs(dz)
+            raw = np.abs(acts[l]); adz = np.abs(dz)
+            a_prev = (np.abs(acts[l] - center)
+                      if (l == 0 and center is not None) else raw)
             if l == 0:
                 b_f, d_f = source.features(idx, xb)
             else:
-                b_f = np.repeat(b_s[:, None], a_prev.shape[1], 1)
-                d_f = np.repeat(d_s[:, None], a_prev.shape[1], 1)
+                b_f = np.repeat(b_s[:, None], raw.shape[1], 1)
+                d_f = np.repeat(d_s[:, None], raw.shape[1], 1)
+            infl[l][:-1] += raw.T @ adz
             mass[l][:-1] += a_prev.T @ adz
             R[l][:-1] += (a_prev * b_f).T @ adz
             S[l][:-1] += (a_prev * d_f).T @ adz
+            infl[l][-1] += adz.sum(0)
             mass[l][-1] += adz.sum(0)
             R[l][-1] += (b_s[:, None] * adz).sum(0)
             S[l][-1] += (d_s[:, None] * adz).sum(0)
@@ -221,7 +240,7 @@ def accumulate(Ws, bs, X, Y, source: TrustSource, batch: int = 512,
                 dz = (dz @ Ws[l].T) * (zs[l - 1] > 0)
         if verbose and (s0 // batch) % 20 == 0:
             print(f"    replay {min(s0 + batch, n):>6}/{n}", flush=True)
-    return mass, R, S
+    return infl, mass, R, S
 
 
 def attribute(Ws, bs, X, Y, source: TrustSource, evidence: float = 50.0,
@@ -234,7 +253,7 @@ def attribute(Ws, bs, X, Y, source: TrustSource, evidence: float = 50.0,
     influence matrices (used for reporting which parameters are live)."""
     from subjective_logic import bpq_vec
     L = len(Ws)
-    mass, R, S = accumulate(Ws, bs, X, Y, source, batch=batch, verbose=verbose)
+    infl, mass, R, S = accumulate(Ws, bs, X, Y, source, batch=batch, verbose=verbose)
     omegas = []
     for l in range(L):
         m = mass[l]

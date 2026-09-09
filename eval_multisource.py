@@ -65,6 +65,32 @@ def build_sources(X, y_oh, args, patch_idx, patch_value):
     return src, Xp, np.eye(y_oh.shape[1], dtype=np.float32)[yp], len(victims)
 
 
+def get_subset_model(Xp, Yp, X_test, y_test_oh, seed, args, cache_dir, keep, tag):
+    """Train (or reuse) a model on a subset of the corpus, for the baselines
+    that discard a source and retrain."""
+    import numpy as _np
+    leak = getattr(args, "poison_leak", 0.0)
+    path = os.path.join(cache_dir,
+                        f"nn_{tag}_seed{seed}" + (f"_leak{leak:g}" if leak else "") + ".pkl")
+    if not os.path.exists(path):
+        os.environ["PATAS_SEED"] = str(seed)
+        from NN.primaryNN import NeuralNetwork
+        from main import get_lr_mnist
+        nn = NeuralNetwork(Xp.shape[1], hidden_sizes=list(args.arch),
+                           output_size=Yp.shape[1], ptas=False, operation=False)
+        nn.train(Xp[keep], Yp[keep], X_test, y_test_oh, epochs=args.epochs,
+                 batch_size=128, shuffle=True, lr_scheduler=get_lr_mnist)
+        os.makedirs(cache_dir, exist_ok=True)
+        nn.save_model(path)
+    with open(path, "rb") as fh:
+        wd = pickle.load(fh)
+    Ws, bs, i = [], [], 1
+    while f"W{i}" in wd:
+        Ws.append(_np.asarray(wd[f"W{i}"], _np.float32))
+        bs.append(_np.asarray(wd[f"b{i}"], _np.float32).reshape(-1)); i += 1
+    return Ws, bs
+
+
 def get_model(Xp, Yp, X_test, y_test_oh, seed, args, cache_dir):
     """Train (or reuse) the network for one seed."""
     leak = getattr(args, "poison_leak", 0.0)
@@ -76,7 +102,7 @@ def get_model(Xp, Yp, X_test, y_test_oh, seed, args, cache_dir):
     else:
         os.environ["PATAS_SEED"] = str(seed)
         from NN.primaryNN import NeuralNetwork
-        from main import get_lr_mnist
+        from main import get_lr_mnist, get_lr_gtsrb
         nn = NeuralNetwork(Xp.shape[1], hidden_sizes=list(args.arch),
                            output_size=Yp.shape[1], ptas=False, operation=False)
         nn.train(Xp, Yp, X_test, y_test_oh, epochs=args.epochs,
@@ -148,9 +174,10 @@ def main():
                                         tuple(args.pois_pair))
         print(f"\n[multi] seed {seed}: undefended clean {acc0*100:.2f}%  "
               f"attack success {asr0*100:.2f}%")
-        mass, R, S = accumulate(Ws, bs, Xp, Yp, src_obj, verbose=False)
+        mu = Xp[src == 0].mean(0)
+        infl, mass, R, S = accumulate(Ws, bs, Xp, Yp, src_obj, verbose=False, center=mu)
         m0 = mass[0][:-1]
-        live = m0.sum(1) > np.percentile(m0.sum(1), 20)
+        live = infl[0][:-1].sum(1) > np.percentile(infl[0][:-1].sum(1), 20)
         r = np.divide(args.evidence * R[0][:-1], m0, out=np.zeros_like(m0), where=m0 > 1e-12)
         s = np.divide(args.evidence * S[0][:-1], m0, out=np.zeros_like(m0), where=m0 > 1e-12)
         om = bpq_vec(r, s, W=2.0)
@@ -195,6 +222,23 @@ def main():
         else:
             print(f"[multi] seed {seed}: threshold {args.threshold} flags nothing "
                   f"(correct when no corruption is localised in input space)")
+        # What a defender would do instead of pruning: discard the source they
+        # believe compromised, or everything not audited, and retrain. Under
+        # leakage neither removes the poison the attacker put in the audited
+        # source, which is the case the threat model is built on.
+        for tag, keep in (("drop-compromised", src != 2),
+                          ("drop-unverified", src == 0)):
+            Wd, bd = get_subset_model(Xp, Yp, X_test, y_test_oh, seed, args,
+                                      cache, keep, tag)
+            ad, _, zd = ER.evaluate(Wd, bd, X_test, y_test, patch_idx,
+                                    tuple(args.pois_pair))
+            m = np.isin(y_test, args.unknown_classes)
+            bd_ = float(np.mean(ER.forward(Wd, bd, X_test[m]).argmax(1) == y_test[m]))
+            rows.append(dict(seed=seed, criterion=tag, budget=-2.0,
+                             clean_acc=ad, asr=zd, unknown_class_acc=bd_,
+                             trigger_recall=float("nan")))
+            print(f"[multi] seed {seed}: {tag} (retrained, {int(keep.sum())} samples) "
+                  f"-> clean {ad*100:.2f}%  attack {zd*100:.2f}%")
         rows.append(dict(seed=seed, criterion="undefended", budget=0.0,
                          clean_acc=acc0, asr=asr0,
                          unknown_class_acc=float(np.mean(
@@ -207,13 +251,15 @@ def main():
         return (float(np.mean(v)), float(np.std(v))) if v else (float("nan"),) * 2
     print(f"\n{'criterion':<12}{'budget':>7}{'clean acc':>16}{'attack success':>18}"
           f"{'acc on B classes':>19}{'trigger':>9}")
-    for frac in [0.0, -1.0] + list(args.budgets):
+    for frac in [0.0, -2.0, -1.0] + list(args.budgets):
         for crit in (["undefended"] if frac == 0.0
+                     else ["drop-compromised", "drop-unverified"] if frac == -2.0
                      else ["opinion@thr", "scalar@thr"] if frac == -1.0
                      else ["opinion", "scalar"]):
             a, ad = agg(crit, frac, "clean_acc"); z, zd = agg(crit, frac, "asr")
             b, _ = agg(crit, frac, "unknown_class_acc"); t, _ = agg(crit, frac, "trigger_recall")
-            lbl = "thr" if frac == -1.0 else f"{frac*100:.0f}%"
+            lbl = ("thr" if frac == -1.0 else "retrain" if frac == -2.0
+                   else f"{frac*100:.0f}%")
             print(f"{crit:<14}{lbl:>6}{a*100:>11.2f}±{ad*100:<4.2f}"
                   f"{z*100:>13.2f}±{zd*100:<4.2f}{b*100:>14.2f}%{t*100:>9.0f}%")
     os.makedirs(cache, exist_ok=True)

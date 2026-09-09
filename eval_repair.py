@@ -81,7 +81,7 @@ def prune_units(Ws, bs, units):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--dataset", default="mnist", choices=["mnist", "gtsrb"])
+    ap.add_argument("--dataset", default="mnist", choices=["mnist", "fashion", "gtsrb"])
     ap.add_argument("--arch", type=int, nargs="+", default=[128])
     ap.add_argument("--poisoned-patch", type=int, default=4)
     ap.add_argument("--poison-mode", choices=["both", "flip", "patch"], default="both")
@@ -132,10 +132,11 @@ def main():
     src = ProvenanceSource(len(X), args.untrusted_tail, op)
     print(f"[repair] defender knows only: the last {args.untrusted_tail*100:.0f}% of the "
           f"training data comes from an untrusted source, opinion {op}")
-    mass, R, S = accumulate(Ws, bs, X, Y, src, verbose=True)
+    mu = X[~src.untrusted].mean(0)
+    infl, mass, R, S = accumulate(Ws, bs, X, Y, src, verbose=True, center=mu)
 
     m0 = mass[0][:-1]                       # (in, hidden) influence per weight
-    live = m0.sum(1) > np.percentile(m0.sum(1), 20)
+    live = infl[0][:-1].sum(1) > np.percentile(infl[0][:-1].sum(1), 20)
     r = np.divide(args.evidence * R[0][:-1], m0, out=np.zeros_like(m0), where=m0 > 1e-12)
     s = np.divide(args.evidence * S[0][:-1], m0, out=np.zeros_like(m0), where=m0 > 1e-12)
     om = bpq_vec(r, s, W=2.0)
