@@ -93,6 +93,9 @@ def main():
     ap.add_argument("--budgets", type=float, nargs="+",
                     default=[0.05, 0.10, 0.15, 0.20])
     ap.add_argument("--evidence", type=float, default=50.0)
+    ap.add_argument("--threshold", type=float, default=0.25,
+                    help="Attributed-trust threshold below which a feature is "
+                         "flagged; validated on clean models to flag nothing")
     args = ap.parse_args()
 
     import eval_repair as ER
@@ -113,6 +116,10 @@ def main():
           f"B unknown (owns classes {args.unknown_classes}) {np.mean(src==1)*100:.0f}%   "
           f"C compromised {np.mean(src==2)*100:.0f}%   poisoned samples {n_pois}")
     cache = f"results/MultiSource_mnist_{'_'.join(map(str,args.arch))}"
+    # The training data depends only on the compromised source, so models are
+    # shared across scenarios; summaries are not, and must not collide.
+    scen = (f"uc{'-'.join(map(str,args.unknown_classes))}"
+            f"_cf{args.compromised_frac:g}_p{args.patch_size}")
     src_obj = MultiSourceProvenance(src, [(1, 0, 0), (0, 0, 1), (0, 1, 0)])
 
     rows = []
@@ -148,6 +155,27 @@ def main():
                 rows.append(dict(seed=seed, criterion=name, budget=frac,
                                  clean_acc=acc, asr=asr, unknown_class_acc=bacc,
                                  trigger_recall=float(np.isin(patch_idx, sel).mean())))
+        # Operating rule: the opinion flags what falls below its threshold and
+        # that count becomes the budget BOTH criteria are given, so the
+        # comparison stays matched while the defender never picks a budget.
+        k_thr = int(((crit["opinion"] < args.threshold) & live).sum())
+        if k_thr > 0:
+            for name, score in crit.items():
+                sel = np.argsort(np.where(live, score, np.inf))[:k_thr]
+                W_, b_ = ER.prune_features(Ws, bs, sel)
+                acc, pair, asr = ER.evaluate(W_, b_, X_test, y_test, patch_idx,
+                                             tuple(args.pois_pair))
+                m = np.isin(y_test, args.unknown_classes)
+                bacc = float(np.mean(ER.forward(W_, b_, X_test[m]).argmax(1) == y_test[m]))
+                rows.append(dict(seed=seed, criterion=f"{name}@thr", budget=-1.0,
+                                 n_selected=k_thr, clean_acc=acc, asr=asr,
+                                 unknown_class_acc=bacc,
+                                 trigger_recall=float(np.isin(patch_idx, sel).mean())))
+            print(f"[multi] seed {seed}: threshold {args.threshold} flags "
+                  f"{k_thr} of {int(live.sum())} live features")
+        else:
+            print(f"[multi] seed {seed}: threshold {args.threshold} flags nothing "
+                  f"(correct when no corruption is localised in input space)")
         rows.append(dict(seed=seed, criterion="undefended", budget=0.0,
                          clean_acc=acc0, asr=asr0,
                          unknown_class_acc=float(np.mean(
@@ -160,19 +188,23 @@ def main():
         return (float(np.mean(v)), float(np.std(v))) if v else (float("nan"),) * 2
     print(f"\n{'criterion':<12}{'budget':>7}{'clean acc':>16}{'attack success':>18}"
           f"{'acc on B classes':>19}{'trigger':>9}")
-    for frac in [0.0] + list(args.budgets):
-        for crit in (["undefended"] if frac == 0.0 else ["opinion", "scalar"]):
+    for frac in [0.0, -1.0] + list(args.budgets):
+        for crit in (["undefended"] if frac == 0.0
+                     else ["opinion@thr", "scalar@thr"] if frac == -1.0
+                     else ["opinion", "scalar"]):
             a, ad = agg(crit, frac, "clean_acc"); z, zd = agg(crit, frac, "asr")
             b, _ = agg(crit, frac, "unknown_class_acc"); t, _ = agg(crit, frac, "trigger_recall")
-            print(f"{crit:<12}{frac*100:>6.0f}%{a*100:>11.2f}±{ad*100:<4.2f}"
+            lbl = "thr" if frac == -1.0 else f"{frac*100:.0f}%"
+            print(f"{crit:<14}{lbl:>6}{a*100:>11.2f}±{ad*100:<4.2f}"
                   f"{z*100:>13.2f}±{zd*100:<4.2f}{b*100:>14.2f}%{t*100:>9.0f}%")
     os.makedirs(cache, exist_ok=True)
-    with open(os.path.join(cache, "summary.json"), "w", encoding="utf-8") as fh:
+    with open(os.path.join(cache, f"summary_{scen}.json"), "w", encoding="utf-8") as fh:
         json.dump(dict(arch=args.arch, epochs=args.epochs, seeds=args.seeds,
+                       scenario=scen, threshold=args.threshold,
                        compromised_frac=args.compromised_frac,
                        unknown_classes=args.unknown_classes,
                        patch_size=args.patch_size, rows=rows), fh, indent=2)
-    print(f"\n[multi] saved {cache}/summary.json")
+    print(f"\n[multi] saved {cache}/summary_{scen}.json")
 
 
 if __name__ == "__main__":
