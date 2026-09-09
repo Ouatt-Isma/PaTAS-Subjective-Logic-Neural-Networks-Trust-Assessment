@@ -338,6 +338,7 @@ def main():
     out = (f"results/ConvAttr_{args.dataset}_p{args.poisoned_patch}"
            f"_{args.arch}" + ("_aug" if args.augment else "")
            + ("" if args.live_pct == 0.0 else f"_lp{args.live_pct:g}")
+           + ("" if args.rule == "mad" else f"_{args.rule}")
            + ("_clean" if args.clean_control else ""))
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "summary.json"), "w", encoding="utf-8") as fh:
