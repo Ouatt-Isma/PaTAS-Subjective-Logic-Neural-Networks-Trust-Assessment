@@ -74,7 +74,57 @@ def self_influence(Ws, bs, X, Y, batch=512):
     return out
 
 
-def train_model(X, Y, X_test, Y_test, arch, epochs, seed, path):
+def features(Ws, bs, X, batch=2048):
+    """Penultimate activations, the representation both representation-space
+    backdoor defences operate on."""
+    out = []
+    for s0 in range(0, len(X), batch):
+        a = X[s0:s0 + batch]
+        for l in range(len(Ws) - 1):
+            a = np.maximum(a @ Ws[l] + bs[l], 0.0)
+        out.append(a)
+    return np.concatenate(out, 0)
+
+
+def spectral_signature_scores(F, y):
+    """Tran et al.: within each class, project the centred representations
+    onto their top singular vector and score by the squared projection.
+    Poisoned samples are expected to carry an outlying spectral component."""
+    sc = np.zeros(len(F))
+    for c in np.unique(y):
+        m = y == c
+        Fc = F[m] - F[m].mean(0, keepdims=True)
+        if len(Fc) < 2:
+            continue
+        _, _, Vt = np.linalg.svd(Fc, full_matrices=False)
+        sc[m] = (Fc @ Vt[0]) ** 2
+    return sc
+
+
+def activation_clustering_select(F, y, n_comp=10, ratio=0.35):
+    """Chen et al.: within each class, reduce the representations and split
+    them in two; the smaller cluster is treated as poisoned when the split is
+    uneven enough.  The method sets its own removal size, so it is reported
+    with the count it chooses rather than at a budget we impose."""
+    from sklearn.decomposition import PCA
+    from sklearn.cluster import KMeans
+    sel = []
+    for c in np.unique(y):
+        idx = np.where(y == c)[0]
+        if len(idx) < 20:
+            continue
+        Z = PCA(n_components=min(n_comp, F.shape[1], len(idx) - 1),
+                random_state=0).fit_transform(F[idx])
+        lab = KMeans(n_clusters=2, n_init=10, random_state=0).fit_predict(Z)
+        small = 0 if (lab == 0).sum() < (lab == 1).sum() else 1
+        frac = (lab == small).mean()
+        if frac < ratio:                      # an even split means no signature
+            sel.extend(idx[lab == small].tolist())
+    return np.array(sorted(sel), dtype=int)
+
+
+def train_model(X, Y, X_test, Y_test, arch, epochs, seed, path,
+                lr_sched=None):
     """Train (or reuse) one network with the framework's own trainer."""
     if os.path.exists(path):
         with open(path, "rb") as fh:
@@ -82,11 +132,11 @@ def train_model(X, Y, X_test, Y_test, arch, epochs, seed, path):
     else:
         os.environ["PATAS_SEED"] = str(seed)
         from NN.primaryNN import NeuralNetwork
-        from main import get_lr_mnist
+        from main import get_lr_mnist, get_lr_gtsrb
         nn = NeuralNetwork(X.shape[1], hidden_sizes=list(arch), output_size=Y.shape[1],
                            ptas=False, operation=False)
         nn.train(X, Y, X_test, Y_test, epochs=epochs, batch_size=128,
-                 shuffle=True, lr_scheduler=get_lr_mnist)
+                 shuffle=True, lr_scheduler=lr_sched or get_lr_mnist)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         nn.save_model(path)
         with open(path, "rb") as fh:
@@ -100,12 +150,17 @@ def train_model(X, Y, X_test, Y_test, arch, epochs, seed, path):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--dataset", default="mnist", choices=["mnist", "gtsrb"])
+    ap.add_argument("--dataset", default="mnist", choices=["mnist", "fashion", "gtsrb"])
     ap.add_argument("--arch", type=int, nargs="+", default=[128])
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     ap.add_argument("--poisoned-patch", type=int, default=4)
     ap.add_argument("--untrusted-tail", type=float, default=1.0 / 3.0)
+    ap.add_argument("--poison-frac", type=float, default=1.0,
+                    help="Fraction of the eligible samples in the untrusted "
+                         "source that are actually poisoned. Lowering it "
+                         "tests defences that rely on the poison forming a "
+                         "visible structure in representation space.")
     ap.add_argument("--drop-budgets", type=float, nargs="+", default=[0.05, 0.10, 0.15],
                     help="Fraction of TRAINING SAMPLES the sample-level arms drop")
     ap.add_argument("--k", type=float, default=8.0,
@@ -123,14 +178,34 @@ def main():
     from attribution import accumulate, ProvenanceSource, flag_features
     from subjective_logic import bpq_vec
 
+    from main import get_lr_mnist, get_lr_gtsrb
+    LR = get_lr_gtsrb if args.dataset == "gtsrb" else get_lr_mnist
     meta = DATASET_META[args.dataset]
     ER.PATCH_VALUE = meta["scale_patch"](1.0)
     img, pois_pair = meta["img_size"], tuple(meta["pois_pair"])
     patch_idx = np.array([img * r + c for r in range(args.poisoned_patch)
                           for c in range(args.poisoned_patch)])
 
-    X, X_test, Y, Y_test, _ = load_data(args.dataset, "clean", "clean",
-                                        poisoned_patch=args.poisoned_patch)
+    if args.poison_frac >= 1.0:
+        X, X_test, Y, Y_test, _ = load_data(args.dataset, "clean", "clean",
+                                            poisoned_patch=args.poisoned_patch)
+    else:
+        # Poison a chosen fraction ourselves so the rate can be swept.
+        X, X_test, Y, Y_test, _ = load_data(args.dataset, "clean", "clean")
+        X = np.asarray(X, np.float32).copy(); Y = np.asarray(Y, np.float32).copy()
+        _y = Y.argmax(1); _n = len(X)
+        _a, _b = tuple(meta["pois_pair"])
+        _idx = np.array([i for i in range(int(round((1 - args.untrusted_tail) * _n)), _n)
+                         if _y[i] in (_a, _b)])
+        _rng = np.random.default_rng(9876)
+        _sel = _rng.choice(_idx, int(round(args.poison_frac * len(_idx))), replace=False)
+        _pi = np.array([meta["img_size"] * r + c for r in range(args.poisoned_patch)
+                        for c in range(args.poisoned_patch)])
+        X[np.ix_(_sel, _pi)] = meta["scale_patch"](1.0)
+        for i in _sel:
+            Y[i] = np.eye(Y.shape[1], dtype=np.float32)[_b if _y[i] == _a else _a]
+        print(f"[infl] poisoned {len(_sel)} of {len(_idx)} eligible "
+              f"({len(_sel)/_n*100:.2f}% of the corpus)")
     X = np.asarray(X, np.float32); Y = np.asarray(Y, np.float32)
     X_test = np.asarray(X_test, np.float32); Y_test = np.asarray(Y_test, np.float32)
     y_test = Y_test.argmax(1)
@@ -141,22 +216,25 @@ def main():
     print(f"[infl] {args.dataset}: {n} train, untrusted source {untrusted.mean()*100:.0f}%, "
           f"{int(lit.sum())} samples actually carry the trigger ({lit.mean()*100:.1f}%)")
 
-    cache = f"results/Influence_{args.dataset}_{'_'.join(map(str,args.arch))}_p{args.poisoned_patch}"
+    cache = (f"results/Influence_{args.dataset}_{'_'.join(map(str,args.arch))}"
+             f"_p{args.poisoned_patch}"
+             + (f"_pf{args.poison_frac:g}" if args.poison_frac < 1.0 else ""))
     src = ProvenanceSource(n, args.untrusted_tail, (0.0, 1.0, 0.0))
     rows = []
 
     for seed in args.seeds:
         Ws, bs = train_model(X, Y, X_test, Y_test, args.arch, args.epochs, seed,
-                             f"{cache}/models/full_seed{seed}.pkl")
+                             f"{cache}/models/full_seed{seed}.pkl", LR)
         acc, _, asr = ER.evaluate(Ws, bs, X_test, y_test, patch_idx, pois_pair)
         rows.append(dict(seed=seed, arm="undefended", dropped=0, retrained=False,
                          clean_acc=acc, asr=asr, poison_recall=float("nan")))
         print(f"\n[infl] seed {seed}: undefended clean {acc*100:.2f}%  attack {asr*100:.2f}%")
 
         # --- this work: prune parameters, no retraining ---------------------
-        mass, R, S = accumulate(Ws, bs, X, Y, src, verbose=False)
+        mu = X[~untrusted].mean(0)
+        infl, mass, R, S = accumulate(Ws, bs, X, Y, src, verbose=False, center=mu)
         m0 = mass[0][:-1]
-        live = m0.sum(1) > np.percentile(m0.sum(1), 20)
+        live = infl[0][:-1].sum(1) > np.percentile(infl[0][:-1].sum(1), 20)
         r = np.divide(args.evidence * R[0][:-1], m0, out=np.zeros_like(m0), where=m0 > 1e-12)
         s_ = np.divide(args.evidence * S[0][:-1], m0, out=np.zeros_like(m0), where=m0 > 1e-12)
         om = bpq_vec(r, s_, W=2.0)
@@ -176,7 +254,7 @@ def main():
         # --- drop the whole untrusted source and retrain --------------------
         keep = ~untrusted
         W2, b2 = train_model(X[keep], Y[keep], X_test, Y_test, args.arch,
-                             args.epochs, seed, f"{cache}/models/dropsrc_seed{seed}.pkl")
+                             args.epochs, seed, f"{cache}/models/dropsrc_seed{seed}.pkl", LR)
         a3, _, z3 = ER.evaluate(W2, b2, X_test, y_test, patch_idx, pois_pair)
         rows.append(dict(seed=seed, arm="drop-source", dropped=int(untrusted.sum()),
                          retrained=True, clean_acc=a3, asr=z3,
@@ -188,14 +266,33 @@ def main():
         infl = self_influence(Ws, bs, X, Y)
         order = np.argsort(-infl)
         rng = np.random.default_rng(seed)
+
+        # --- representation-space defences, both retrained ------------------
+        F = features(Ws, bs, X); yl = Y.argmax(1)
+        spec_order = np.argsort(-spectral_signature_scores(F, yl))
+        ac_sel = activation_clustering_select(F, yl)
+        if len(ac_sel):
+            mask = np.ones(n, bool); mask[ac_sel] = False
+            W4, b4 = train_model(X[mask], Y[mask], X_test, Y_test, args.arch,
+                                 args.epochs, seed, f"{cache}/models/ac_seed{seed}.pkl", LR)
+            a5, _, z5 = ER.evaluate(W4, b4, X_test, y_test, patch_idx, pois_pair)
+        else:
+            a5, z5 = acc, asr
+        rows.append(dict(seed=seed, arm="activation clustering", dropped=int(len(ac_sel)),
+                         retrained=True, clean_acc=a5, asr=z5,
+                         poison_recall=float(lit[ac_sel].sum() / max(lit.sum(), 1))
+                         if len(ac_sel) else 0.0))
+        print(f"[infl]   activation clustering: {len(ac_sel)} samples, retrained -> "
+              f"clean {a5*100:.2f}%  attack {z5*100:.2f}%")
         for frac in args.drop_budgets:
             k = int(round(frac * n))
             for arm, drop in (("influence", order[:k]),
+                              ("spectral", spec_order[:k]),
                               ("random-samples", rng.choice(n, k, replace=False))):
                 mask = np.ones(n, bool); mask[drop] = False
                 tag = f"{arm.split('-')[0]}{int(frac*100)}_seed{seed}"
                 W3, b3 = train_model(X[mask], Y[mask], X_test, Y_test, args.arch,
-                                     args.epochs, seed, f"{cache}/models/{tag}.pkl")
+                                     args.epochs, seed, f"{cache}/models/{tag}.pkl", LR)
                 a4, _, z4 = ER.evaluate(W3, b3, X_test, y_test, patch_idx, pois_pair)
                 rows.append(dict(seed=seed, arm=f"{arm} {int(frac*100)}%", dropped=k,
                                  retrained=True, clean_acc=a4, asr=z4,
