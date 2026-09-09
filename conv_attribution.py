@@ -186,6 +186,12 @@ def main():
                          "ResNet to a competitive accuracy")
     ap.add_argument("--lr", type=float, default=0.05)
     ap.add_argument("--batch", type=int, default=128)
+    ap.add_argument("--clean-control", action="store_true",
+                    help="Train on unpoisoned data with the same provenance "
+                         "split. The attack numbers are then meaningless; what "
+                         "matters is how many positions the rule flags on a "
+                         "model with nothing to find, and what masking them "
+                         "costs.")
     ap.add_argument("--live-pct", type=float, default=20.0,
                     help="Positions below this percentile of input influence "
                          "are treated as inactive and never scored. A trigger "
@@ -215,7 +221,8 @@ def main():
                          for r in range(args.poisoned_patch)
                          for c in range(args.poisoned_patch)])
         y0 = Y.argmax(1); n0 = len(X)
-        for i in range(int(round((1 - args.untrusted_tail) * n0)), n0):
+        for i in ([] if args.clean_control
+                  else range(int(round((1 - args.untrusted_tail) * n0)), n0)):
             if y0[i] in pois:
                 X[i, pidx] = pv
                 Y[i] = np.eye(Y.shape[1], dtype=np.float32)[
@@ -227,8 +234,9 @@ def main():
         pv = meta["scale_patch"](1.0)
         pidx = np.array([img * r + c for r in range(args.poisoned_patch)
                          for c in range(args.poisoned_patch)])
-        X, X_test, Y, Y_test, _ = load_data(args.dataset, "clean", "clean",
-                                            poisoned_patch=args.poisoned_patch)
+        X, X_test, Y, Y_test, _ = load_data(
+            args.dataset, "clean", "clean",
+            poisoned_patch=None if args.clean_control else args.poisoned_patch)
     X = np.asarray(X, np.float32); Y = np.asarray(Y, np.float32)
     X_test = np.asarray(X_test, np.float32); y_test = np.asarray(Y_test).argmax(1)
     n = len(X)
@@ -237,6 +245,9 @@ def main():
     b_n = np.where(untrusted, 0.0, 1.0).astype(np.float32)
     d_n = np.where(untrusted, 1.0, 0.0).astype(np.float32)
     mu = X[~untrusted].mean(0)
+    if args.clean_control:
+        print("[conv] CLEAN CONTROL: no trigger, no label swap; attack numbers "
+              "below are not meaningful")
     print(f"[conv] {args.dataset}: {n} train, {in_ch} channel(s), untrusted "
           f"{untrusted.mean()*100:.0f}%, trigger {args.poisoned_patch}x"
           f"{args.poisoned_patch} over {len(pidx)} input positions")
@@ -322,7 +333,8 @@ def main():
     # the two arms must never write into the same directory.
     out = (f"results/ConvAttr_{args.dataset}_p{args.poisoned_patch}"
            f"_{args.arch}" + ("_aug" if args.augment else "")
-           + ("" if args.live_pct == 20.0 else f"_lp{args.live_pct:g}"))
+           + ("" if args.live_pct == 20.0 else f"_lp{args.live_pct:g}")
+           + ("_clean" if args.clean_control else ""))
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "summary.json"), "w", encoding="utf-8") as fh:
         json.dump(dict(dataset=args.dataset, patch=args.poisoned_patch,
