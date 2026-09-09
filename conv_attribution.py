@@ -108,7 +108,8 @@ def input_attribution(model, X, Y, b_n, d_n, mu, dev, bs=256):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--dataset", default="mnist", choices=["mnist", "fashion", "gtsrb"])
+    ap.add_argument("--dataset", default="mnist",
+                    choices=["mnist", "fashion", "gtsrb", "cifar10"])
     ap.add_argument("--poisoned-patch", type=int, default=4)
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     ap.add_argument("--epochs", type=int, default=6)
@@ -128,13 +129,33 @@ def main():
     from subjective_logic import bpq_vec
 
     dev = "cpu"
-    meta = DATASET_META[args.dataset]
-    img, pois = meta["img_size"], tuple(meta["pois_pair"])
-    pv = meta["scale_patch"](1.0)
-    pidx = np.array([img * r + c for r in range(args.poisoned_patch)
-                     for c in range(args.poisoned_patch)])
-    X, X_test, Y, Y_test, _ = load_data(args.dataset, "clean", "clean",
-                                        poisoned_patch=args.poisoned_patch)
+    if args.dataset == "cifar10":
+        # CIFAR-10 is RGB and is not wired into the framework's poisoning
+        # path, so the trigger is applied here: the same corner patch, set on
+        # all three channels of the samples the untrusted source contributes.
+        in_ch, img, pois = 3, 32, (6, 9)
+        X, X_test, Y, Y_test, _ = load_data("cifar10", "clean", "clean")
+        X = np.asarray(X, np.float32).copy(); Y = np.asarray(Y, np.float32).copy()
+        pv = float(np.percentile(X, 99.9))
+        pidx = np.array([ch * img * img + img * r + c
+                         for ch in range(in_ch)
+                         for r in range(args.poisoned_patch)
+                         for c in range(args.poisoned_patch)])
+        y0 = Y.argmax(1); n0 = len(X)
+        for i in range(int(round((1 - args.untrusted_tail) * n0)), n0):
+            if y0[i] in pois:
+                X[i, pidx] = pv
+                Y[i] = np.eye(Y.shape[1], dtype=np.float32)[
+                    pois[1] if y0[i] == pois[0] else pois[0]]
+    else:
+        in_ch = 1
+        meta = DATASET_META[args.dataset]
+        img, pois = meta["img_size"], tuple(meta["pois_pair"])
+        pv = meta["scale_patch"](1.0)
+        pidx = np.array([img * r + c for r in range(args.poisoned_patch)
+                         for c in range(args.poisoned_patch)])
+        X, X_test, Y, Y_test, _ = load_data(args.dataset, "clean", "clean",
+                                            poisoned_patch=args.poisoned_patch)
     X = np.asarray(X, np.float32); Y = np.asarray(Y, np.float32)
     X_test = np.asarray(X_test, np.float32); y_test = np.asarray(Y_test).argmax(1)
     n = len(X)
@@ -143,8 +164,9 @@ def main():
     b_n = np.where(untrusted, 0.0, 1.0).astype(np.float32)
     d_n = np.where(untrusted, 1.0, 0.0).astype(np.float32)
     mu = X[~untrusted].mean(0)
-    print(f"[conv] {args.dataset}: {n} train, untrusted {untrusted.mean()*100:.0f}%, "
-          f"trigger {args.poisoned_patch}x{args.poisoned_patch}")
+    print(f"[conv] {args.dataset}: {n} train, {in_ch} channel(s), untrusted "
+          f"{untrusted.mean()*100:.0f}%, trigger {args.poisoned_patch}x"
+          f"{args.poisoned_patch} over {len(pidx)} input positions")
 
     def asr(model, mask=None, patched=True):
         """Attack success. With patched=False this is the floor: how often a
@@ -168,7 +190,7 @@ def main():
     rows = []
     for seed in args.seeds:
         np.random.seed(seed)
-        model = SmallCNN(img, Y.shape[1], 1, args.width).to(dev)
+        model = SmallCNN(img, Y.shape[1], in_ch, args.width).to(dev)
         train(model, X, Y, args.epochs, 128, seed, dev)
         model.eval()
         a0 = accuracy(model, X_test, y_test, dev); z0 = asr(model)
