@@ -244,6 +244,27 @@ def attribute(Ws, bs, X, Y, source: TrustSource, evidence: float = 50.0,
     return omegas, mass
 
 
+def flag_features(score, live, k: float = 8.0):
+    """Distribution-relative flagging of suspect parameters.
+
+    The absolute level of attributed trust shifts from one training run to
+    the next (medians of 0.46 to 0.61 across seeds of the same setup), so a
+    fixed threshold flags everything on one model and nothing on another.
+    The separation does not shift: corrupted features sit many robust
+    deviations below the body of the distribution.  Flag a live feature when
+    it lies more than ``k`` scaled MADs below the median, which needs no
+    per-dataset calibration and stays silent when there is no tail.
+
+    Returns (indices, z) with z the robust deviation of every feature.
+    """
+    lv = np.asarray(score)[live]
+    med = float(np.median(lv))
+    mad = float(np.median(np.abs(lv - med)))
+    scale = max(mad * 1.4826, 1e-9)
+    z = (med - np.asarray(score)) / scale
+    return np.where((z > k) & live)[0], z
+
+
 def feedforward_trusted(omegas, input_dim):
     """Output-class opinions under a fully trusted input (the at.pkl object)."""
     from concrete.TensorTO import TensorArrayTO, fill as tfill
