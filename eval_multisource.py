@@ -107,6 +107,10 @@ def main():
     ap.add_argument("--poison-leak", type=float, default=0.0,
                     help="Adaptive adversary: fraction of the poison placed in "
                          "the VERIFIED source, so provenance is partly wrong")
+    ap.add_argument("--k", type=float, default=8.0,
+                    help="Robust deviations below the median at which a "
+                         "feature is flagged; distribution-relative, so it "
+                         "needs no per-dataset or per-run calibration")
     ap.add_argument("--threshold", type=float, default=0.25,
                     help="Attributed-trust threshold below which a feature is "
                          "flagged; validated on clean models to flag nothing")
@@ -114,7 +118,7 @@ def main():
 
     import eval_repair as ER
     from NN.datasets import load_data, mnist_get_scaling
-    from attribution import accumulate, MultiSourceProvenance
+    from attribution import accumulate, MultiSourceProvenance, flag_features
     from subjective_logic import bpq_vec
 
     X, X_test, Y, y_test_oh, _ = load_data("mnist", "clean", "clean")
@@ -173,7 +177,7 @@ def main():
         # Operating rule: the opinion flags what falls below its threshold and
         # that count becomes the budget BOTH criteria are given, so the
         # comparison stays matched while the defender never picks a budget.
-        k_thr = int(((crit["opinion"] < args.threshold) & live).sum())
+        k_thr = int(len(flag_features(crit["opinion"], live, args.k)[0]))
         if k_thr > 0:
             for name, score in crit.items():
                 sel = np.argsort(np.where(live, score, np.inf))[:k_thr]

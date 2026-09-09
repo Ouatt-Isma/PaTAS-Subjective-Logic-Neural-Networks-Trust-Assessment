@@ -108,6 +108,10 @@ def main():
     ap.add_argument("--untrusted-tail", type=float, default=1.0 / 3.0)
     ap.add_argument("--drop-budgets", type=float, nargs="+", default=[0.05, 0.10, 0.15],
                     help="Fraction of TRAINING SAMPLES the sample-level arms drop")
+    ap.add_argument("--k", type=float, default=8.0,
+                    help="Robust deviations below the median at which a "
+                         "feature is flagged; distribution-relative, so it "
+                         "needs no per-dataset or per-run calibration")
     ap.add_argument("--threshold", type=float, default=0.25,
                     help="Attributed-trust threshold for the pruning arm")
     ap.add_argument("--evidence", type=float, default=50.0)
@@ -116,7 +120,7 @@ def main():
     import eval_repair as ER
     from NN.datasets import load_data
     from main import DATASET_META
-    from attribution import accumulate, ProvenanceSource
+    from attribution import accumulate, ProvenanceSource, flag_features
     from subjective_logic import bpq_vec
 
     meta = DATASET_META[args.dataset]
@@ -157,7 +161,7 @@ def main():
         s_ = np.divide(args.evidence * S[0][:-1], m0, out=np.zeros_like(m0), where=m0 > 1e-12)
         om = bpq_vec(r, s_, W=2.0)
         score = (om[..., 0] + 0.5 * om[..., 2]).min(1)
-        sel = np.where((score < args.threshold) & live)[0]
+        sel, _ = flag_features(score, live, args.k)
         if len(sel):
             W_, b_ = ER.prune_features(Ws, bs, sel)
             a2, _, z2 = ER.evaluate(W_, b_, X_test, y_test, patch_idx, pois_pair)
