@@ -39,6 +39,10 @@ import numpy as np
 
 
 def build_sources(X, y_oh, args, patch_idx, patch_value):
+    """Assign sources and poison.  ``--poison-leak f`` is the adaptive
+    adversary: a fraction f of the poisoned samples is placed in the VERIFIED
+    source instead, modelling an attacker who also compromised part of the
+    audited pipeline, or provenance labels that are simply wrong."""
     """Assign every training sample to a source and poison source C."""
     y = y_oh.argmax(1)
     n = len(X)
@@ -47,18 +51,25 @@ def build_sources(X, y_oh, args, patch_idx, patch_value):
     src[(src == 0) & np.isin(y, args.unknown_classes)] = 1         # B unknown
     Xp, yp = X.copy(), y.copy()
     a, b = args.pois_pair
-    n_pois = 0
-    for i in np.where(src == 2)[0]:
-        if y[i] in (a, b):
-            Xp[i, patch_idx] = patch_value
-            yp[i] = b if y[i] == a else a
-            n_pois += 1
-    return src, Xp, np.eye(y_oh.shape[1], dtype=np.float32)[yp], n_pois
+    victims = [i for i in np.where(src == 2)[0] if y[i] in (a, b)]
+    leak = getattr(args, "poison_leak", 0.0)
+    if leak > 0:
+        rng = np.random.default_rng(12345)
+        cand = np.array([i for i in np.where(src == 0)[0] if y[i] in (a, b)])
+        k = int(round(leak * len(victims)))
+        if k and len(cand):
+            victims += list(rng.choice(cand, min(k, len(cand)), replace=False))
+    for i in victims:
+        Xp[i, patch_idx] = patch_value
+        yp[i] = b if y[i] == a else a
+    return src, Xp, np.eye(y_oh.shape[1], dtype=np.float32)[yp], len(victims)
 
 
 def get_model(Xp, Yp, X_test, y_test_oh, seed, args, cache_dir):
     """Train (or reuse) the network for one seed."""
-    path = os.path.join(cache_dir, f"nn_seed{seed}.pkl")
+    leak = getattr(args, "poison_leak", 0.0)
+    path = os.path.join(cache_dir,
+                        f"nn_seed{seed}" + (f"_leak{leak:g}" if leak else "") + ".pkl")
     if os.path.exists(path):
         with open(path, "rb") as fh:
             wd = pickle.load(fh)
@@ -93,6 +104,9 @@ def main():
     ap.add_argument("--budgets", type=float, nargs="+",
                     default=[0.05, 0.10, 0.15, 0.20])
     ap.add_argument("--evidence", type=float, default=50.0)
+    ap.add_argument("--poison-leak", type=float, default=0.0,
+                    help="Adaptive adversary: fraction of the poison placed in "
+                         "the VERIFIED source, so provenance is partly wrong")
     ap.add_argument("--threshold", type=float, default=0.25,
                     help="Attributed-trust threshold below which a feature is "
                          "flagged; validated on clean models to flag nothing")
@@ -119,7 +133,8 @@ def main():
     # The training data depends only on the compromised source, so models are
     # shared across scenarios; summaries are not, and must not collide.
     scen = (f"uc{'-'.join(map(str,args.unknown_classes))}"
-            f"_cf{args.compromised_frac:g}_p{args.patch_size}")
+            f"_cf{args.compromised_frac:g}_p{args.patch_size}"
+            + (f"_leak{args.poison_leak:g}" if args.poison_leak else ""))
     src_obj = MultiSourceProvenance(src, [(1, 0, 0), (0, 0, 1), (0, 1, 0)])
 
     rows = []

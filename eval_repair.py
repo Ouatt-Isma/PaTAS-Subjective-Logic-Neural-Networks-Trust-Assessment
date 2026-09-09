@@ -81,7 +81,7 @@ def prune_units(Ws, bs, units):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--dataset", default="mnist")
+    ap.add_argument("--dataset", default="mnist", choices=["mnist", "gtsrb"])
     ap.add_argument("--arch", type=int, nargs="+", default=[128])
     ap.add_argument("--poisoned-patch", type=int, default=4)
     ap.add_argument("--poison-mode", choices=["both", "flip", "patch"], default="both")
@@ -94,8 +94,8 @@ def main():
     ap.add_argument("--seeds", type=int, default=20, help="Random-control repetitions")
     args = ap.parse_args()
 
-    from NN.datasets import load_data, mnist_get_scaling
-    from main import nn_cache_dir
+    from NN.datasets import load_data
+    from main import nn_cache_dir, DATASET_META
     from attribution import accumulate, ProvenanceSource
     from subjective_logic import bpq_vec
 
@@ -119,10 +119,12 @@ def main():
                                            poison_mode=args.poison_mode)
     X = np.asarray(X, np.float32); Y = np.asarray(Y, np.float32)
     X_test = np.asarray(X_test, np.float32); y_test = np.asarray(y_test_oh).argmax(1)
-    img = int(round(X.shape[1] ** 0.5))
+    meta = DATASET_META[args.dataset]
+    img = meta["img_size"]
     patch_idx = np.array([img * r + c for r in range(args.poisoned_patch)
                           for c in range(args.poisoned_patch)])
-    PATCH_VALUE = mnist_get_scaling(1.0)
+    PATCH_VALUE = meta["scale_patch"](1.0)
+    args.pois_pair = list(meta["pois_pair"])
     print(f"[repair] trigger {args.poisoned_patch}x{args.poisoned_patch} at value "
           f"{PATCH_VALUE:.4f} (dataset scale)")
 
@@ -144,7 +146,7 @@ def main():
     trusted = ~src.untrusted
     act_trusted = np.maximum(X[trusted] @ Ws[0] + bs[0], 0.0).mean(0)  # per hidden unit
 
-    acc0, pair0, asr0 = evaluate(Ws, bs, X_test, y_test, patch_idx)
+    acc0, pair0, asr0 = evaluate(Ws, bs, X_test, y_test, patch_idx, tuple(args.pois_pair))
     print(f"\n[repair] undefended model: clean acc {acc0*100:.2f}%  "
           f"target-class acc {pair0*100:.2f}%  attack success {asr0*100:.2f}%")
 
@@ -162,7 +164,7 @@ def main():
         for name, (kind, sel) in cand.items():
             W2_, b2_ = (prune_features(Ws, bs, sel) if kind == "feat"
                         else prune_units(Ws, bs, sel))
-            acc, pair, asr = evaluate(W2_, b2_, X_test, y_test, patch_idx)
+            acc, pair, asr = evaluate(W2_, b2_, X_test, y_test, patch_idx, tuple(args.pois_pair))
             rec = (float(np.isin(patch_idx, sel).mean()) if kind == "feat" else float("nan"))
             rows.append(dict(method=name, budget=frac, n_removed=len(sel),
                              clean_acc=acc, target_acc=pair, asr=asr, trigger_recall=rec))
@@ -170,7 +172,7 @@ def main():
         for t in range(args.seeds):
             sel = rng.choice(np.where(live)[0], k_f, replace=False)
             W2_, b2_ = prune_features(Ws, bs, sel)
-            a, _, z = evaluate(W2_, b2_, X_test, y_test, patch_idx); accs.append(a); asrs.append(z)
+            a, _, z = evaluate(W2_, b2_, X_test, y_test, patch_idx, tuple(args.pois_pair)); accs.append(a); asrs.append(z)
         rows.append(dict(method="random", budget=frac, n_removed=k_f,
                          clean_acc=float(np.mean(accs)), target_acc=float("nan"),
                          asr=float(np.mean(asrs)), trigger_recall=float(k_f) / n_feat))
