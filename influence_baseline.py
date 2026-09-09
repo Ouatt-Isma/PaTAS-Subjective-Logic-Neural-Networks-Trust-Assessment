@@ -170,6 +170,10 @@ def main():
     ap.add_argument("--threshold", type=float, default=0.25,
                     help="Attributed-trust threshold for the pruning arm")
     ap.add_argument("--evidence", type=float, default=50.0)
+    ap.add_argument("--untrusted-opinion", default="0,1,0",
+                    help="Opinion held about the untrusted source: '0,1,0' "
+                         "believed compromised, '0,0,1' unvetted. The two "
+                         "differ sharply in how many features the rule flags.")
     args = ap.parse_args()
 
     import eval_repair as ER
@@ -218,8 +222,12 @@ def main():
 
     cache = (f"results/Influence_{args.dataset}_{'_'.join(map(str,args.arch))}"
              f"_p{args.poisoned_patch}"
-             + (f"_pf{args.poison_frac:g}" if args.poison_frac < 1.0 else ""))
-    src = ProvenanceSource(n, args.untrusted_tail, (0.0, 1.0, 0.0))
+             + (f"_pf{args.poison_frac:g}" if args.poison_frac < 1.0 else "")
+             + ("" if args.untrusted_opinion == "0,1,0"
+                else f"_op{args.untrusted_opinion.replace(',','')}"))
+    _op = tuple(float(v) for v in args.untrusted_opinion.split(","))
+    src = ProvenanceSource(n, args.untrusted_tail, _op)
+    print(f"[infl] untrusted source opinion {_op}")
     rows = []
 
     for seed in args.seeds:
