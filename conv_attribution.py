@@ -310,7 +310,11 @@ def main():
     t, _ = f("trigger_found")
     print(f"  untrusted share: trigger {a:.3f} vs live {b:.3f}   "
           f"trigger positions found {t:.1f}/{len(pidx)}")
-    out = f"results/ConvAttr_{args.dataset}_p{args.poisoned_patch}"
+    # The architecture and the augmentation flag are part of the key: the
+    # augmentation boundary is exactly the comparison this script makes, so
+    # the two arms must never write into the same directory.
+    out = (f"results/ConvAttr_{args.dataset}_p{args.poisoned_patch}"
+           f"_{args.arch}" + ("_aug" if args.augment else ""))
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "summary.json"), "w", encoding="utf-8") as fh:
         json.dump(dict(dataset=args.dataset, patch=args.poisoned_patch,
