@@ -63,18 +63,77 @@ class SmallCNN(nn.Module):
         return self.fc(x.flatten(1))
 
 
-def train(model, X, Y, epochs, bs, seed, dev):
+class BasicBlock(nn.Module):
+    def __init__(self, cin, cout, stride=1):
+        super().__init__()
+        self.c1 = nn.Conv2d(cin, cout, 3, stride, 1, bias=False)
+        self.b1 = nn.BatchNorm2d(cout)
+        self.c2 = nn.Conv2d(cout, cout, 3, 1, 1, bias=False)
+        self.b2 = nn.BatchNorm2d(cout)
+        self.short = (nn.Sequential() if stride == 1 and cin == cout else
+                      nn.Sequential(nn.Conv2d(cin, cout, 1, stride, bias=False),
+                                    nn.BatchNorm2d(cout)))
+
+    def forward(self, x):
+        o = F.relu(self.b1(self.c1(x)))
+        o = self.b2(self.c2(o))
+        return F.relu(o + self.short(x))
+
+
+class ResNet18(nn.Module):
+    """The standard CIFAR ResNet-18: 3x3 stem, no max-pool, four stages."""
+
+    def __init__(self, img, n_classes, in_ch=3, width=64):
+        super().__init__()
+        self.img, self.in_ch = img, in_ch
+        self.stem = nn.Sequential(nn.Conv2d(in_ch, width, 3, 1, 1, bias=False),
+                                  nn.BatchNorm2d(width), nn.ReLU(inplace=True))
+        cfg = [(width, 1), (width * 2, 2), (width * 4, 2), (width * 8, 2)]
+        layers, cin = [], width
+        for cout, stride in cfg:
+            layers += [BasicBlock(cin, cout, stride), BasicBlock(cout, cout, 1)]
+            cin = cout
+        self.body = nn.Sequential(*layers)
+        self.fc = nn.Linear(cin, n_classes)
+
+    def forward(self, x):
+        x = x.view(-1, self.in_ch, self.img, self.img)
+        x = self.body(self.stem(x))
+        return self.fc(F.adaptive_avg_pool2d(x, 1).flatten(1))
+
+
+def augment(xb, img, in_ch):
+    """Random crop with reflection padding and horizontal flip, the standard
+    CIFAR recipe. Applied on device so it costs nothing measurable."""
+    n = xb.shape[0]
+    x = xb.view(n, in_ch, img, img)
+    x = F.pad(x, (4, 4, 4, 4), mode="reflect")
+    i = torch.randint(0, 9, (2,))
+    x = x[:, :, i[0]:i[0] + img, i[1]:i[1] + img]
+    flip = torch.rand(n, device=x.device) < 0.5
+    x = torch.where(flip[:, None, None, None], x.flip(-1), x)
+    return x.reshape(n, -1)
+
+
+def train(model, X, Y, epochs, bs, seed, dev, aug=False, img=32, in_ch=3, lr=0.05):
     torch.manual_seed(seed)
-    opt = torch.optim.SGD(model.parameters(), lr=0.05, momentum=0.9)
+    opt = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9,
+                          weight_decay=5e-4, nesterov=True)
+    sched = torch.optim.lr_scheduler.OneCycleLR(
+        opt, max_lr=lr, total_steps=epochs * ((len(X) + bs - 1) // bs))
     Xt = torch.as_tensor(X, device=dev); Yt = torch.as_tensor(Y.argmax(1), device=dev)
     n = len(Xt)
+    model.train()
     for ep in range(epochs):
         perm = torch.randperm(n, device=dev)
         for i in range(0, n, bs):
             idx = perm[i:i + bs]
-            opt.zero_grad()
-            loss = F.cross_entropy(model(Xt[idx]), Yt[idx])
-            loss.backward(); opt.step()
+            xb = Xt[idx]
+            if aug:
+                xb = augment(xb, img, in_ch)
+            opt.zero_grad(set_to_none=True)
+            F.cross_entropy(model(xb), Yt[idx]).backward()
+            opt.step(); sched.step()
     return model
 
 
@@ -121,6 +180,13 @@ def main():
                          "dense experiments use.")
     ap.add_argument("--evidence", type=float, default=50.0)
     ap.add_argument("--width", type=int, default=16)
+    ap.add_argument("--arch", choices=["small", "resnet18"], default="small")
+    ap.add_argument("--augment", action="store_true",
+                    help="Random crop and horizontal flip, needed to train a "
+                         "ResNet to a competitive accuracy")
+    ap.add_argument("--lr", type=float, default=0.05)
+    ap.add_argument("--batch", type=int, default=128)
+    ap.add_argument("--device", default=None, help="cuda / cpu (auto by default)")
     args = ap.parse_args()
 
     from NN.datasets import load_data
@@ -128,7 +194,9 @@ def main():
     from attribution import flag_features
     from subjective_logic import bpq_vec
 
-    dev = "cpu"
+    dev = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[conv] device {dev}"
+          + (f" ({torch.cuda.get_device_name(0)})" if dev == "cuda" else ""))
     if args.dataset == "cifar10":
         # CIFAR-10 is RGB and is not wired into the framework's poisoning
         # path, so the trigger is applied here: the same corner patch, set on
@@ -190,8 +258,11 @@ def main():
     rows = []
     for seed in args.seeds:
         np.random.seed(seed)
-        model = SmallCNN(img, Y.shape[1], in_ch, args.width).to(dev)
-        train(model, X, Y, args.epochs, 128, seed, dev)
+        Net = ResNet18 if args.arch == "resnet18" else SmallCNN
+        w = args.width if args.arch == "small" else max(args.width, 64)
+        model = Net(img, Y.shape[1], in_ch, w).to(dev)
+        train(model, X, Y, args.epochs, args.batch, seed, dev,
+              aug=args.augment, img=img, in_ch=in_ch, lr=args.lr)
         model.eval()
         a0 = accuracy(model, X_test, y_test, dev); z0 = asr(model)
         floor = asr(model, patched=False)
