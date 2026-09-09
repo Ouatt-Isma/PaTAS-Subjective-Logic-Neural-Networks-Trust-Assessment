@@ -192,11 +192,14 @@ def main():
                          "matters is how many positions the rule flags on a "
                          "model with nothing to find, and what masking them "
                          "costs.")
-    ap.add_argument("--live-pct", type=float, default=20.0,
+    ap.add_argument("--live-pct", type=float, default=0.0,
                     help="Positions below this percentile of input influence "
-                         "are treated as inactive and never scored. A trigger "
-                         "position that falls below it cannot be recovered, so "
-                         "this is the coverage knob.")
+                         "are treated as inactive and never scored. The dense "
+                         "pipeline discards the bottom fifth, and inheriting "
+                         "that here was wrong: a trigger position is quiet by "
+                         "construction, so an influence filter removes exactly "
+                         "what the method exists to find. Default 0 (score "
+                         "everything); pass 20 to reproduce the ablation.")
     ap.add_argument("--device", default=None, help="cuda / cpu (auto by default)")
     args = ap.parse_args()
 
@@ -283,8 +286,9 @@ def main():
         a0 = accuracy(model, X_test, y_test, dev); z0 = asr(model)
         floor = asr(model, patched=False)
         infl, mass, R, S = input_attribution(model, X, Y, b_n, d_n, mu, dev)
-        # the live filter must use true influence: a trigger position carries
-        # little centred mass while being highly influential
+        # The filter must use true influence rather than centred mass, and by
+        # default it excludes nothing: on convolutional models the positions
+        # it used to drop were the trigger positions themselves.
         live = infl > np.percentile(infl, args.live_pct)
         r = np.divide(args.evidence * R, mass, out=np.zeros_like(mass), where=mass > 1e-12)
         s = np.divide(args.evidence * S, mass, out=np.zeros_like(mass), where=mass > 1e-12)
@@ -333,7 +337,7 @@ def main():
     # the two arms must never write into the same directory.
     out = (f"results/ConvAttr_{args.dataset}_p{args.poisoned_patch}"
            f"_{args.arch}" + ("_aug" if args.augment else "")
-           + ("" if args.live_pct == 20.0 else f"_lp{args.live_pct:g}")
+           + ("" if args.live_pct == 0.0 else f"_lp{args.live_pct:g}")
            + ("_clean" if args.clean_control else ""))
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "summary.json"), "w", encoding="utf-8") as fh:
