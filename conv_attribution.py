@@ -114,6 +114,10 @@ def main():
     ap.add_argument("--epochs", type=int, default=6)
     ap.add_argument("--untrusted-tail", type=float, default=1.0 / 3.0)
     ap.add_argument("--k", type=float, default=8.0)
+    ap.add_argument("--rule", choices=["mad", "otsu"], default="mad",
+                    help="Decision rule. 'mad' (default here) thresholds at k "
+                         "robust deviations; 'otsu' is the bimodality rule the "
+                         "dense experiments use.")
     ap.add_argument("--evidence", type=float, default=50.0)
     ap.add_argument("--width", type=int, default=16)
     args = ap.parse_args()
@@ -177,7 +181,10 @@ def main():
         s = np.divide(args.evidence * S, mass, out=np.zeros_like(mass), where=mass > 1e-12)
         om = bpq_vec(r, s, W=2.0)
         score = om[..., 0] + 0.5 * om[..., 2]
-        sel, _ = flag_features(score, live, args.k)
+        # The bimodality rule that helps the dense case fires on only one of
+        # three convolutional seeds, so the fixed-deviation rule is used here.
+        # No single decision rule was best in both settings; see the paper.
+        sel, _ = flag_features(score, live, args.k, rule=args.rule)
         share = np.divide(S, mass, out=np.zeros_like(mass), where=mass > 1e-12)
         order = np.argsort(np.where(live, score, np.inf))
         ranks = [int(np.where(order == p)[0][0]) for p in pidx if live[p]]

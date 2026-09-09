@@ -263,25 +263,63 @@ def attribute(Ws, bs, X, Y, source: TrustSource, evidence: float = 50.0,
     return omegas, mass
 
 
-def flag_features(score, live, k: float = 8.0):
-    """Distribution-relative flagging of suspect parameters.
+def flag_features(score, live, k: float = 8.0, rule: str = "otsu",
+                  min_ratio: float = 2.0, max_frac: float = 0.30):
+    """Decide which parameters the untrusted data shaped.
 
-    The absolute level of attributed trust shifts from one training run to
-    the next (medians of 0.46 to 0.61 across seeds of the same setup), so a
-    fixed threshold flags everything on one model and nothing on another.
-    The separation does not shift: corrupted features sit many robust
-    deviations below the body of the distribution.  Flag a live feature when
-    it lies more than ``k`` scaled MADs below the median, which needs no
-    per-dataset calibration and stays silent when there is no tail.
+    Ranking parameters by attributed trust is robust: across datasets,
+    architectures, poisoning rates and provenance contamination, corrupted
+    parameters sit at the bottom.  Turning that ranking into a decision is
+    the fragile part, and a threshold at a fixed number of robust deviations
+    fails in both directions, because the spread of the distribution moves
+    with the training run, the poisoning rate and the architecture.
 
-    Returns (indices, z) with z the robust deviation of every feature.
+    The default rule instead looks for structure.  A corrupted model's trust
+    values are bimodal: a small cluster of parameters the untrusted data
+    dominated, and the bulk.  We split where between-class variance is
+    maximal (Otsu's criterion, which needs no parameter) and accept the split
+    only when it is genuinely bimodal, i.e. between-class variance exceeds
+    ``min_ratio`` times within-class variance.  The remaining constant is a
+    variance ratio rather than a distance, so it does not move with the scale
+    of the distribution.
+
+    Firing on a clean model is cheap: the flagged parameters carry little
+    influence, and removing about seventy of them costs $0.07$ points of
+    accuracy, so the rule is deliberately set to be sensitive.
+
+    ``rule="mad"`` restores the earlier fixed-deviation threshold.
+    Returns (indices, z) with z the robust deviation of every feature, kept
+    for reporting.
     """
-    lv = np.asarray(score)[live]
+    score = np.asarray(score, dtype=np.float64)
+    lv = score[live]
     med = float(np.median(lv))
     mad = float(np.median(np.abs(lv - med)))
-    scale = max(mad * 1.4826, 1e-9)
-    z = (med - np.asarray(score)) / scale
-    return np.where((z > k) & live)[0], z
+    z = (med - score) / max(mad * 1.4826, 1e-9)
+    if rule == "mad":
+        return np.where((z > k) & live)[0], z
+    if rule != "otsu":
+        raise ValueError(f"unknown rule: {rule!r}")
+    idx = np.where(live)[0]
+    order = idx[np.argsort(score[idx])]
+    v = score[order]
+    n = len(v)
+    if n < 20:
+        return np.array([], dtype=int), z
+    cs = np.cumsum(v)
+    total = cs[-1]
+    best_b, best_i = -1.0, 0
+    for i in range(1, max(2, int(max_frac * n))):
+        w0, w1 = i / n, (n - i) / n
+        between = w0 * w1 * (cs[i - 1] / i - (total - cs[i - 1]) / (n - i)) ** 2
+        if between > best_b:
+            best_b, best_i = between, i
+    if best_i == 0:
+        return np.array([], dtype=int), z
+    within = (np.var(v[:best_i]) * best_i + np.var(v[best_i:]) * (n - best_i)) / n
+    if best_b / max(within, 1e-12) <= min_ratio:
+        return np.array([], dtype=int), z
+    return order[:best_i], z
 
 
 def feedforward_trusted(omegas, input_dim):
