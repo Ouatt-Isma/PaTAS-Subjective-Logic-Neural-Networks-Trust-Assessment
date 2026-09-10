@@ -187,6 +187,16 @@ def main():
             # the scalar ablation: verified share of the influence mass
             "scalar": np.divide(R[0][:-1], m0, out=np.zeros_like(m0),
                                 where=m0 > 1e-12).min(1),
+            # The stronger scalar a reviewer will propose: the influence-
+            # weighted mean of each sample's projected probability.  Audited
+            # samples score 1, unvetted 0.5, compromised 0, so it keeps the
+            # three states apart with one number; it differs from the opinion
+            # only in aggregating a DIFFERENCE of evidence (R - S) rather
+            # than a ratio, and in carrying no uncertainty.  Since every
+            # sample's b + d + u = 1 it equals 0.5 + 0.5 (R - S) / m.
+            "scalar-proj": (0.5 + 0.5 * np.divide(R[0][:-1] - S[0][:-1], m0,
+                                                  out=np.zeros_like(m0),
+                                                  where=m0 > 1e-12)).min(1),
         }
         n_feat = Ws[0].shape[0]
         for frac in args.budgets:
@@ -254,8 +264,8 @@ def main():
     for frac in [0.0, -2.0, -1.0] + list(args.budgets):
         for crit in (["undefended"] if frac == 0.0
                      else ["drop-compromised", "drop-unverified"] if frac == -2.0
-                     else ["opinion@thr", "scalar@thr"] if frac == -1.0
-                     else ["opinion", "scalar"]):
+                     else ["opinion@thr", "scalar@thr", "scalar-proj@thr"] if frac == -1.0
+                     else ["opinion", "scalar", "scalar-proj"]):
             a, ad = agg(crit, frac, "clean_acc"); z, zd = agg(crit, frac, "asr")
             b, _ = agg(crit, frac, "unknown_class_acc"); t, _ = agg(crit, frac, "trigger_recall")
             lbl = ("thr" if frac == -1.0 else "retrain" if frac == -2.0
